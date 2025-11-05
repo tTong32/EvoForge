@@ -3,11 +3,43 @@ use crate::organisms::components::*;
 use crate::world::WorldGrid;
 use rand::Rng;
 
+use std::fs::{File, OpenOptions};
+use std::io::{Write, BufWriter};
+use std::path::PathBuf;
+
 /// Resource to track which organism we're logging
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub struct TrackedOrganism {
     entity: Option<Entity>,
     log_counter: u32,
+    csv_writer: Option<BufWriter<File>>,
+    csv_path: PathBuf,
+    header_written: bool,
+}
+
+impl Default for TrackedOrganism {
+    fn default() -> Self {
+        // Create data/logs directory if it doesn't exist
+        let logs_dir = PathBuf::from("data/logs");
+        if !logs_dir.exists() {
+            std::fs::create_dir_all(&logs_dir).expect("Failed to create logs directory");
+        }
+        
+        // Create CSV file with timestamp
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let csv_path = logs_dir.join(format!("organism_tracking_{}.csv", timestamp));
+        
+        Self {
+            entity: None,
+            log_counter: 0,
+            csv_writer: None,
+            csv_path,
+            header_written: false,
+        }
+    }
 }
 
 /// Spawn initial organisms in the world
@@ -66,7 +98,17 @@ pub fn spawn_initial_organisms(
     // Set the first organism as the tracked one
     if let Some(entity) = first_entity {
         tracked.entity = Some(entity);
+        
+        // Initialize CSV writer
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&tracked.csv_path)
+            .expect("Failed to open CSV file for writing");
+        tracked.csv_writer = Some(BufWriter::new(file));
+        
         info!("[TRACKED] Started tracking organism entity: {:?}", entity);
+        info!("[TRACKED] CSV logging to: {}", tracked.csv_path.display());
         info!("[TRACKED] Logging will begin after 10 ticks...");
     }
     
@@ -208,14 +250,16 @@ pub fn log_tracked_organism(
     
     if let Some(entity) = tracked_mut.entity {
         if let Ok((_entity, position, velocity, energy, age, size, org_type)) = query.get(entity) {
-            let action = if velocity.0.length() < 0.1 {
+            let speed = velocity.0.length();
+            let action = if speed < 0.1 {
                 "Resting"
-            } else if velocity.0.length() > 10.0 {
+            } else if speed > 10.0 {
                 "Moving Fast"
             } else {
                 "Wandering"
             };
             
+            // Console logging
             info!(
                 "[TRACKED ORGANISM] Tick: {} | Pos: ({:.2}, {:.2}) | Vel: ({:.2}, {:.2}) | Speed: {:.2} | Energy: {:.2}/{:.2} ({:.1}%) | Age: {} | Size: {:.2} | Type: {:?} | Action: {}",
                 tracked_mut.log_counter,
@@ -223,7 +267,7 @@ pub fn log_tracked_organism(
                 position.0.y,
                 velocity.0.x,
                 velocity.0.y,
-                velocity.0.length(),
+                speed,
                 energy.current,
                 energy.max,
                 energy.ratio() * 100.0,
@@ -232,10 +276,56 @@ pub fn log_tracked_organism(
                 org_type,
                 action
             );
+            
+            // CSV logging
+            let needs_header = !tracked_mut.header_written;
+            let tick = tracked_mut.log_counter;
+            
+            if let Some(ref mut writer) = tracked_mut.csv_writer {
+                // Write CSV header if not written yet
+                if needs_header {
+                    writeln!(
+                        writer,
+                        "tick,position_x,position_y,velocity_x,velocity_y,speed,energy_current,energy_max,energy_ratio,age,size,organism_type,action"
+                    ).expect("Failed to write CSV header");
+                    writer.flush().expect("Failed to flush CSV writer");
+                }
+                
+                // Write data row
+                writeln!(
+                    writer,
+                    "{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{},{:.6},{:?},{}",
+                    tick,
+                    position.0.x,
+                    position.0.y,
+                    velocity.0.x,
+                    velocity.0.y,
+                    speed,
+                    energy.current,
+                    energy.max,
+                    energy.ratio(),
+                    age.0,
+                    size.value(),
+                    org_type,
+                    action
+                ).expect("Failed to write CSV row");
+                
+                writer.flush().expect("Failed to flush CSV writer");
+            }
+            
+            // Mark header as written after dropping writer borrow
+            if needs_header {
+                tracked_mut.header_written = true;
+            }
         } else {
             // Entity no longer exists (probably died)
             info!("[TRACKED] Organism entity {:?} no longer exists", entity);
             tracked_mut.entity = None;
+            
+            // Close CSV writer
+            if let Some(mut writer) = tracked_mut.csv_writer.take() {
+                writer.flush().expect("Failed to flush CSV writer on close");
+            }
         }
     }
 }
