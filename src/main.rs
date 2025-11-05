@@ -1,14 +1,20 @@
 mod world;
 mod utils;
+mod organisms;
 
 use bevy::prelude::*;
 use world::WorldPlugin;
+use organisms::OrganismPlugin;
 use tracing_subscriber::EnvFilter;
 
 fn main() {
     // Initialize tracing subscriber for better error visibility
+    // Default to INFO level if RUST_LOG is not set
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+    
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
+        .with_env_filter(filter)
         .init();
     
     App::new()
@@ -21,6 +27,7 @@ fn main() {
             ..default()
         }))
         .add_plugins(WorldPlugin)
+        .add_plugins(OrganismPlugin)
         .add_systems(Startup, setup)
         .add_systems(Update, update_simulation)
         .run();
