@@ -1,0 +1,28 @@
+# Rust build artifacts
+target/
+**/*.rs.bk
+*.pdb
+
+# Cargo
+Cargo.lock
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+data/logs/*
+!data/logs/.gitkeep
+
+# Outputs
+data/outputs/*
+!data/outputs/.gitkeep
+

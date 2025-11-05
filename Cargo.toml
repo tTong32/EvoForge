@@ -1,0 +1,47 @@
+[package]
+name = "evolution-sim"
+version = "0.1.0"
+edition = "2021"
+authors = ["Evolution Sim Team"]
+description = "A modular evolutionary ecosystem simulator with millions of autonomous agents"
+
+[dependencies]
+# Core Framework
+bevy = { version = "0.12", default-features = false, features = ["default", "multi-threaded", "bevy_asset", "bevy_render", "bevy_core_pipeline", "bevy_sprite", "bevy_ui"] }
+bevy_ecs = "0.12"
+
+# Parallelization
+rayon = "1.8"
+
+# Random Number Generation
+rand = "0.8"
+fastrand = "2.0"
+
+# Data Structures
+smallvec = "1.11"
+dashmap = "5.5"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Mathematics
+glam = "0.24"
+
+# Optional: Noise generation (for future climate)
+# noise = "0.9"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+
+[profile.dev]
+opt-level = 0
+debug = true
+
