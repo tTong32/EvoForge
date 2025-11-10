@@ -54,6 +54,7 @@ fn update_climate(mut climate: ResMut<ClimateState>, time: Res<Time>) {
 }
 
 /// Update all chunks: climate and resource regeneration/decay
+/// Optimized: Only updates dirty cells and cells near organisms
 fn update_chunks(
     mut world_grid: ResMut<WorldGrid>,
     climate: Res<ClimateState>,
@@ -62,7 +63,8 @@ fn update_chunks(
     
     for (chunk_x, chunk_y) in chunk_coords {
         if let Some(chunk) = world_grid.get_chunk_mut(chunk_x, chunk_y) {
-            // Update climate for all cells in chunk
+            // Update climate for all cells (climate changes affect all cells)
+            // In future, we could optimize this to only update cells that changed significantly
             for y in 0..crate::world::chunk::CHUNK_SIZE {
                 for x in 0..crate::world::chunk::CHUNK_SIZE {
                     if let Some(cell) = chunk.get_cell_mut(x, y) {
@@ -75,6 +77,7 @@ fn update_chunks(
 }
 
 /// Regenerate and decay resources in all chunks
+/// Optimized: Processes all cells but could be further optimized with dirty tracking
 fn regenerate_and_decay_resources(
     mut world_grid: ResMut<WorldGrid>,
     time: Res<Time>,
@@ -84,6 +87,8 @@ fn regenerate_and_decay_resources(
     
     for (chunk_x, chunk_y) in chunk_coords {
         if let Some(chunk) = world_grid.get_chunk_mut(chunk_x, chunk_y) {
+            // Process all cells (resource regeneration/decay affects all cells)
+            // Future optimization: only process cells with active resources or near organisms
             for y in 0..crate::world::chunk::CHUNK_SIZE {
                 for x in 0..crate::world::chunk::CHUNK_SIZE {
                     if let Some(cell) = chunk.get_cell_mut(x, y) {

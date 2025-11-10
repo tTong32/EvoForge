@@ -1,7 +1,6 @@
 use bevy::prelude::*;
 use glam::Vec2;
 use crate::organisms::components::*;
-use crate::organisms::genetics::{Genome, traits};
 use crate::world::{WorldGrid, ResourceType};
 
 /// Behavior state machine - organisms can be in one of these states
@@ -90,6 +89,7 @@ pub fn collect_sensory_data(
     organism_type: OrganismType,
     size: f32,
     world_grid: &WorldGrid,
+    spatial_hash: &crate::utils::SpatialHash,
     organism_query: &Query<(Entity, &Position, &SpeciesId, &OrganismType, &Size, &Energy), With<Alive>>,
 ) -> SensoryData {
     let mut sensory = SensoryData::new();
@@ -99,29 +99,33 @@ pub fn collect_sensory_data(
         sensory.current_cell_resources = cell.resource_density;
     }
     
-    // Query nearby organisms within sensory range
-    for (other_entity, other_pos, other_species, other_type, other_size, other_energy) in organism_query.iter() {
+    // Query nearby organisms using spatial hash (much faster than iterating all)
+    let nearby_entities = spatial_hash.query_radius(position, sensory_range);
+    
+    for other_entity in nearby_entities {
         if other_entity == entity {
             continue; // Skip self
         }
         
-        let distance = (position - other_pos.0).length();
-        if distance <= sensory_range {
-            let is_predator = is_predator_of(organism_type, *other_type, other_size.value(), size);
-            let is_prey = is_prey_of(organism_type, *other_type, size, other_size.value());
-            let is_mate = *other_species == species_id && 
-                         *other_type == organism_type &&
-                         !other_energy.is_dead() &&
-                         distance <= sensory_range * 0.5; // Mates need to be closer
-            
-            sensory.nearby_organisms.push((
-                other_entity,
-                other_pos.0,
-                distance,
-                is_predator,
-                is_prey,
-                is_mate,
-            ));
+        if let Ok((_, other_pos, other_species, other_type, other_size, other_energy)) = organism_query.get(other_entity) {
+            let distance = (position - other_pos.0).length();
+            if distance <= sensory_range {
+                let is_predator = is_predator_of(organism_type, *other_type, other_size.value(), size);
+                let is_prey = is_prey_of(organism_type, *other_type, size, other_size.value());
+                let is_mate = *other_species == species_id && 
+                             *other_type == organism_type &&
+                             !other_energy.is_dead() &&
+                             distance <= sensory_range * 0.5; // Mates need to be closer
+                
+                sensory.nearby_organisms.push((
+                    other_entity,
+                    other_pos.0,
+                    distance,
+                    is_predator,
+                    is_prey,
+                    is_mate,
+                ));
+            }
         }
     }
     
@@ -195,7 +199,7 @@ fn is_prey_of(predator_type: OrganismType, prey_type: OrganismType, predator_siz
 /// Returns the new behavior state and optional target
 pub fn decide_behavior(
     energy: &Energy,
-    genome: &Genome,
+    cached_traits: &crate::organisms::components::CachedTraits,
     organism_type: OrganismType,
     sensory: &SensoryData,
     current_state: BehaviorState,
@@ -204,8 +208,8 @@ pub fn decide_behavior(
     // Priority system: Survival > Reproduction > Exploration
     
     // 1. HIGHEST PRIORITY: Flee from predators (survival)
-    let aggression = traits::express_aggression(genome);
-    let boldness = traits::express_boldness(genome);
+    let aggression = cached_traits.aggression;
+    let boldness = cached_traits.boldness;
     
     // Find nearest predator
     let nearest_predator = sensory.nearby_organisms.iter()
@@ -256,7 +260,7 @@ pub fn decide_behavior(
     }
     
     // 4. FOURTH PRIORITY: Mate if energy is high enough
-    let reproduction_threshold = traits::express_reproduction_threshold(genome);
+    let reproduction_threshold = cached_traits.reproduction_threshold;
     if energy.ratio() >= reproduction_threshold {
         if let Some((entity, mate_pos, distance, _, _, _is_mate)) = sensory.nearby_organisms.iter()
             .filter(|(_, _, _, _, _, is_mate)| *is_mate)
@@ -321,12 +325,12 @@ fn is_at_food_source(organism_type: OrganismType, sensory: &SensoryData) -> bool
 pub fn calculate_behavior_velocity(
     behavior: &Behavior,
     position: Vec2,
-    genome: &Genome,
+    cached_traits: &crate::organisms::components::CachedTraits,
     _organism_type: OrganismType,
     energy: &Energy,
     time: f32,
 ) -> Vec2 {
-    let max_speed = traits::express_speed(genome);
+    let max_speed = cached_traits.speed;
     let speed_factor = energy.ratio().max(0.3); // Minimum 30% speed even when low energy
     let current_speed = max_speed * speed_factor;
     

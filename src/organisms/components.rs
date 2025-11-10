@@ -160,6 +160,40 @@ pub enum OrganismType {
 #[derive(Component, Debug, Clone, Copy)]
 pub struct ReproductionCooldown(pub u32);
 
+/// Cached trait values derived from genome (updated when genome changes)
+/// This avoids recalculating traits every frame
+#[derive(Component, Debug, Clone)]
+pub struct CachedTraits {
+    pub speed: f32,
+    pub size: f32,
+    pub metabolism_rate: f32,
+    pub movement_cost: f32,
+    pub max_energy: f32,
+    pub reproduction_cooldown: f32,
+    pub reproduction_threshold: f32,
+    pub sensory_range: f32,
+    pub aggression: f32,
+    pub boldness: f32,
+}
+
+impl CachedTraits {
+    pub fn from_genome(genome: &crate::organisms::genetics::Genome) -> Self {
+        use crate::organisms::genetics::traits;
+        Self {
+            speed: traits::express_speed(genome),
+            size: traits::express_size(genome),
+            metabolism_rate: traits::express_metabolism_rate(genome),
+            movement_cost: traits::express_movement_cost(genome),
+            max_energy: traits::express_max_energy(genome),
+            reproduction_cooldown: traits::express_reproduction_cooldown(genome),
+            reproduction_threshold: traits::express_reproduction_threshold(genome),
+            sensory_range: traits::express_sensory_range(genome),
+            aggression: traits::express_aggression(genome),
+            boldness: traits::express_boldness(genome),
+        }
+    }
+}
+
 impl ReproductionCooldown {
     pub fn new(ticks: u32) -> Self {
         Self(ticks)

@@ -15,6 +15,9 @@ pub struct Chunk {
     pub chunk_y: i32,
     /// Dirty flag - indicates if this chunk has been modified this tick
     pub dirty: bool,
+    /// Set of cell coordinates that have been modified (for efficient updates)
+    /// Stored as (x, y) tuples in local chunk coordinates
+    pub dirty_cells: std::collections::HashSet<(usize, usize)>,
 }
 
 impl Chunk {
@@ -25,6 +28,7 @@ impl Chunk {
             chunk_x,
             chunk_y,
             dirty: false,
+            dirty_cells: std::collections::HashSet::new(),
         }
     }
 
@@ -41,6 +45,7 @@ impl Chunk {
     pub fn get_cell_mut(&mut self, x: usize, y: usize) -> Option<&mut Cell> {
         if x < CHUNK_SIZE && y < CHUNK_SIZE {
             self.dirty = true;
+            self.dirty_cells.insert((x, y));
             Some(&mut self.cells[y * CHUNK_SIZE + x])
         } else {
             None
@@ -66,6 +71,12 @@ impl Chunk {
     /// Mark chunk as clean (not dirty)
     pub fn mark_clean(&mut self) {
         self.dirty = false;
+        self.dirty_cells.clear();
+    }
+    
+    /// Get dirty cells in this chunk
+    pub fn get_dirty_cells(&self) -> &std::collections::HashSet<(usize, usize)> {
+        &self.dirty_cells
     }
 
     /// Get all cells in this chunk (for iteration)

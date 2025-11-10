@@ -1,5 +1,8 @@
 /// Utility functions and helpers for the simulation
 
+pub mod spatial_hash;
+pub use spatial_hash::*;
+
 /// Convert between different coordinate systems
 pub mod coordinates {
     /// Convert world coordinates to chunk coordinates

@@ -3,7 +3,7 @@ use crate::organisms::components::*;
 use crate::organisms::genetics::{Genome, traits, DEFAULT_MUTATION_RATE};
 use crate::organisms::behavior::*;
 use crate::world::{WorldGrid, ResourceType};
-use rand::Rng;
+use crate::utils::SpatialHashGrid;
 
 use std::fs::{File, OpenOptions};
 use std::io::{Write, BufWriter};
@@ -19,6 +19,7 @@ pub struct TrackedOrganism {
     header_written: bool,
 }
 
+// TRACKED ORGANISM LOGGING
 impl Default for TrackedOrganism {
     fn default() -> Self {
         // Create data/logs directory if it doesn't exist
@@ -52,7 +53,7 @@ pub fn spawn_initial_organisms(
 ) {
     info!("Spawning initial organisms...");
     
-    let mut rng = rand::thread_rng();
+    let mut rng = fastrand::Rng::new();
     let spawn_count = 100; // Start with 100 organisms
     
     // Spawn organisms randomly within initialized chunks
@@ -63,8 +64,8 @@ pub fn spawn_initial_organisms(
     let mut first_entity = None;
     
     for i in 0..spawn_count {
-        let x = rng.gen_range(-spawn_range..spawn_range);
-        let y = rng.gen_range(-spawn_range..spawn_range);
+        let x = rng.f32() * spawn_range * 2.0 - spawn_range;
+        let y = rng.f32() * spawn_range * 2.0 - spawn_range;
         
         // Create random genome for this organism
         let genome = Genome::random();
@@ -76,15 +77,17 @@ pub fn spawn_initial_organisms(
         let movement_cost = traits::express_movement_cost(&genome);
         let reproduction_cooldown = traits::express_reproduction_cooldown(&genome) as u32;
         
-        let organism_type = match rng.gen_range(0..3) {
+        let organism_type = match rng.usize(0..3) {
             0 => OrganismType::Producer,
             1 => OrganismType::Consumer,
             _ => OrganismType::Decomposer,
         };
         
         // Random initial velocity
-        let vel_x = rng.gen_range(-10.0..10.0);
-        let vel_y = rng.gen_range(-10.0..10.0);
+        let vel_x = rng.f32() * 20.0 - 10.0;
+        let vel_y = rng.f32() * 20.0 - 10.0;
+        
+        let cached_traits = CachedTraits::from_genome(&genome);
         
         let entity = commands.spawn((
             Position::new(x, y),
@@ -95,6 +98,7 @@ pub fn spawn_initial_organisms(
             Metabolism::new(metabolism_rate, movement_cost),
             ReproductionCooldown::new(reproduction_cooldown),
             genome,
+            cached_traits,
             SpeciesId::new(0), // All start as same species for now
             organism_type,
             Behavior::new(),
@@ -107,6 +111,7 @@ pub fn spawn_initial_organisms(
         }
     }
     
+    // TRACKED ORGANISM LOGGING
     // Set the first organism as the tracked one
     if let Some(entity) = first_entity {
         tracked.entity = Some(entity);
@@ -127,18 +132,31 @@ pub fn spawn_initial_organisms(
     info!("Spawned {} organisms", spawn_count);
 }
 
+/// Update spatial hash grid with current organism positions
+pub fn update_spatial_hash(
+    mut spatial_hash: ResMut<SpatialHashGrid>,
+    query: Query<(Entity, &Position), With<Alive>>,
+) {
+    // Clear and rebuild spatial hash each frame
+    spatial_hash.organisms.clear();
+    
+    for (entity, position) in query.iter() {
+        spatial_hash.organisms.insert(entity, position.0);
+    }
+}
+
 /// Update metabolism - organisms consume energy over time
-/// Uses traits from genome (if available) or falls back to Metabolism component
+/// Uses cached traits if available, otherwise falls back to Metabolism component
 pub fn update_metabolism(
-    mut query: Query<(&mut Energy, &Velocity, &Metabolism, &Size, Option<&Genome>)>,
+    mut query: Query<(&mut Energy, &Velocity, &Metabolism, &Size, Option<&CachedTraits>)>,
     time: Res<Time>,
 ) {
     let dt = time.delta_seconds();
     
-    for (mut energy, velocity, metabolism, size, genome_opt) in query.iter_mut() {
-        // Use genome traits if available, otherwise use Metabolism component
-        let (base_rate, movement_cost_mult) = if let Some(genome) = genome_opt {
-            (traits::express_metabolism_rate(genome), traits::express_movement_cost(genome))
+    for (mut energy, velocity, metabolism, size, traits_opt) in query.iter_mut() {
+        // Use cached traits if available, otherwise use Metabolism component
+        let (base_rate, movement_cost_mult) = if let Some(traits) = traits_opt {
+            (traits.metabolism_rate, traits.movement_cost)
         } else {
             (metabolism.base_rate, metabolism.movement_cost)
         };
@@ -166,25 +184,26 @@ pub fn update_behavior(
         &Position,
         &mut Behavior,
         &Energy,
-        &Genome,
+        &CachedTraits,
         &SpeciesId,
         &OrganismType,
         &Size,
     ), With<Alive>>,
     world_grid: Res<WorldGrid>,
+    spatial_hash: Res<SpatialHashGrid>,
     organism_query: Query<(Entity, &Position, &SpeciesId, &OrganismType, &Size, &Energy), With<Alive>>,
     time: Res<Time>,
 ) {
     let dt = time.delta_seconds();
     
-    for (entity, position, mut behavior, energy, genome, species_id, organism_type, size) in query.iter_mut() {
+    for (entity, position, mut behavior, energy, cached_traits, species_id, organism_type, size) in query.iter_mut() {
         // Update state time
         behavior.state_time += dt;
         
-        // Get sensory range from genome
-        let sensory_range = traits::express_sensory_range(genome);
+        // Get sensory range from cached traits
+        let sensory_range = cached_traits.sensory_range;
         
-        // Collect sensory data
+        // Collect sensory data using spatial hash for efficient queries
         let sensory = collect_sensory_data(
             entity,
             position.0,
@@ -193,13 +212,14 @@ pub fn update_behavior(
             *organism_type,
             size.value(),
             &world_grid,
+            &spatial_hash.organisms,
             &organism_query,
         );
         
-        // Make behavior decision
+        // Make behavior decision using cached traits
         let (new_state, target_entity, target_position) = decide_behavior(
             energy,
-            genome,
+            cached_traits,
             *organism_type,
             &sensory,
             behavior.state,
@@ -220,8 +240,7 @@ pub fn update_movement(
         &mut Velocity, 
         &Behavior,
         &Energy, 
-        &Size, 
-        &Genome,
+        &CachedTraits,
         &OrganismType,
         Entity
     ), With<Alive>>,
@@ -231,18 +250,18 @@ pub fn update_movement(
     let dt = time.delta_seconds();
     let time_elapsed = time.elapsed_seconds();
     
-    for (mut position, mut velocity, behavior, energy, _size, genome, organism_type, entity) in query.iter_mut() {
+    for (mut position, mut velocity, behavior, energy, cached_traits, organism_type, entity) in query.iter_mut() {
         // Skip if dead
         if energy.is_dead() {
             velocity.0 = Vec2::ZERO;
             continue;
         }
         
-        // Calculate velocity based on behavior state
+        // Calculate velocity based on behavior state using cached traits
         let desired_velocity = calculate_behavior_velocity(
             behavior,
             position.0,
-            genome,
+            cached_traits,
             *organism_type,
             energy,
             time_elapsed,
@@ -357,57 +376,58 @@ pub fn handle_reproduction(
         &mut Energy,
         &mut ReproductionCooldown,
         &Genome,
+        &CachedTraits,
         &SpeciesId,
         &OrganismType,
     ), With<Alive>>,
+    spatial_hash: Res<SpatialHashGrid>,
+    organism_query: Query<(Entity, &Position, &Genome, &SpeciesId), With<Alive>>,
 ) {
-    let mut rng = rand::thread_rng();
-    
-    // First pass: collect all organism data for mate finding
-    let all_organisms: Vec<_> = query.iter().map(|(e, p, _, _, g, s, o)| {
-        (e, *p, g.clone(), *s, *o)
-    }).collect();
-    
-    // Second pass: find candidates and their mates
+    let mut rng = fastrand::Rng::new();
     let mut reproduction_events = Vec::new();
     
-    for (entity, position, energy, cooldown, genome, species_id, org_type) in query.iter() {
+    for (entity, position, energy, cooldown, genome, cached_traits, species_id, org_type) in query.iter() {
         if !cooldown.is_ready() {
             continue;
         }
         
-        let reproduction_threshold = traits::express_reproduction_threshold(genome);
-        if energy.ratio() < reproduction_threshold {
+        // Use cached reproduction threshold
+        if energy.ratio() < cached_traits.reproduction_threshold {
             continue;
         }
         
         // Only attempt reproduction with a probability (not guaranteed every frame)
         // This prevents mass reproduction when cooldown expires
-        if !rng.gen_bool(0.1) { // 10% chance per frame when conditions are met
+        if rng.f32() >= 0.1 { // 10% chance per frame when conditions are met
             continue;
         }
         
         // Decide between asexual and sexual reproduction
-        let use_sexual = rng.gen_bool(0.3);
+        let use_sexual = rng.f32() < 0.3;
         
         let offspring_genome = if use_sexual {
-            // Sexual reproduction - find a mate
-            let sensory_range = traits::express_sensory_range(genome);
+            // Sexual reproduction - find a mate using spatial hash
+            let sensory_range = cached_traits.sensory_range;
             let mut mate_opt = None;
             
-            for (other_entity, other_pos, other_genome, other_species, _) in &all_organisms {
-                if *other_entity == entity {
+            // Use spatial hash to only check nearby organisms
+            let nearby_entities = spatial_hash.organisms.query_radius(position.0, sensory_range);
+            
+            for other_entity in nearby_entities {
+                if other_entity == entity {
                     continue; // Skip self
                 }
                 
-                if *other_species != *species_id {
-                    continue; // Only mate with same species
-                }
-                
-                let distance = (position.0 - other_pos.0).length();
-                if distance <= sensory_range {
-                    mate_opt = Some(other_genome.clone());
-                    break;
+                if let Ok((_, other_pos, other_genome, other_species)) = organism_query.get(other_entity) {
+                    if *other_species != *species_id {
+                        continue; // Only mate with same species
+                    }
+                    
+                    let distance = (position.0 - other_pos.0).length();
+                    if distance <= sensory_range {
+                        mate_opt = Some(other_genome.clone());
+                        break;
+                    }
                 }
             }
             
@@ -420,13 +440,13 @@ pub fn handle_reproduction(
             genome.clone_with_mutation(DEFAULT_MUTATION_RATE)
         };
         
-        reproduction_events.push((entity, *position, offspring_genome, *species_id, *org_type));
+        reproduction_events.push((entity, position.0, offspring_genome, *species_id, *org_type));
     }
     
     // Third pass: actually reproduce (mutable access)
-    for (entity, position, offspring_genome, species_id, org_type) in reproduction_events {
-        if let Ok((_, _, mut energy, mut cooldown, _genome, _, _)) = query.get_mut(entity) {
-            // Express traits from offspring genome
+    for (entity, _position, offspring_genome, species_id, org_type) in reproduction_events {
+        if let Ok((_, _, mut energy, mut cooldown, _, _, _, _)) = query.get_mut(entity) {
+            // Express traits from offspring genome (for Size component)
             let size = traits::express_size(&offspring_genome);
             let max_energy = traits::express_max_energy(&offspring_genome);
             let metabolism_rate = traits::express_metabolism_rate(&offspring_genome);
@@ -434,12 +454,14 @@ pub fn handle_reproduction(
             let reproduction_cooldown = traits::express_reproduction_cooldown(&offspring_genome) as u32;
             
             // Spawn offset from parent (small random offset)
-            let offset_x = rng.gen_range(-5.0..5.0);
-            let offset_y = rng.gen_range(-5.0..5.0);
+            let offset_x = rng.f32() * 10.0 - 5.0;
+            let offset_y = rng.f32() * 10.0 - 5.0;
             
-            // Spawn offspring
+            // Spawn offspring with cached traits
+            let cached_traits = CachedTraits::from_genome(&offspring_genome);
+            
             commands.spawn((
-                Position::new(position.0.x + offset_x, position.0.y + offset_y),
+                Position::new(_position.x + offset_x, _position.y + offset_y),
                 Velocity::new(0.0, 0.0),
                 Energy::new(max_energy * 0.5), // Start with half energy
                 Age::new(),
@@ -447,6 +469,7 @@ pub fn handle_reproduction(
                 Metabolism::new(metabolism_rate, movement_cost),
                 ReproductionCooldown::new(reproduction_cooldown),
                 offspring_genome,
+                cached_traits,
                 species_id, // Inherit species ID
                 org_type,
                 Behavior::new(),
@@ -468,6 +491,7 @@ pub fn handle_reproduction(
 pub fn handle_death(
     mut commands: Commands,
     mut tracked: ResMut<TrackedOrganism>,
+    mut spatial_hash: ResMut<SpatialHashGrid>,
     query: Query<(Entity, &Energy), With<Alive>>,
 ) {
     for (entity, energy) in query.iter() {
@@ -477,6 +501,8 @@ pub fn handle_death(
                 tracked.entity = None; // Clear tracking
             }
             info!("Organism died at energy level: {:.2}", energy.current);
+            // Remove from spatial hash before despawning
+            spatial_hash.organisms.remove(entity);
             commands.entity(entity).despawn();
         }
     }
@@ -485,7 +511,7 @@ pub fn handle_death(
 /// Log tracked organism information periodically
 pub fn log_tracked_organism(
     tracked: ResMut<TrackedOrganism>,
-    query: Query<(Entity, &Position, &Velocity, &Energy, &Age, &Size, &OrganismType, &Behavior, &Genome), With<Alive>>,
+    query: Query<(Entity, &Position, &Velocity, &Energy, &Age, &Size, &OrganismType, &Behavior, &CachedTraits), With<Alive>>,
 ) {
     let mut tracked_mut = tracked;
     tracked_mut.log_counter += 1;
@@ -496,12 +522,12 @@ pub fn log_tracked_organism(
     }
     
     if let Some(entity) = tracked_mut.entity {
-        if let Ok((_entity, position, velocity, energy, age, size, org_type, behavior, genome)) = query.get(entity) {
+        if let Ok((_entity, position, velocity, energy, age, size, org_type, behavior, cached_traits)) = query.get(entity) {
             let speed = velocity.0.length();
             let behavior_state = format!("{:?}", behavior.state);
-            let sensory_range = traits::express_sensory_range(genome);
-            let aggression = traits::express_aggression(genome);
-            let boldness = traits::express_boldness(genome);
+            let sensory_range = cached_traits.sensory_range;
+            let aggression = cached_traits.aggression;
+            let boldness = cached_traits.boldness;
             
             // Format target information
             let target_info = if let Some(target_pos) = behavior.target_position {
@@ -533,7 +559,7 @@ pub fn log_tracked_organism(
                 boldness
             );
             
-            // CSV logging
+            // CSV logging (optimized: batch writes, flush less frequently)
             let needs_header = !tracked_mut.header_written;
             let tick = tracked_mut.log_counter;
             
@@ -544,7 +570,6 @@ pub fn log_tracked_organism(
                         writer,
                         "tick,position_x,position_y,velocity_x,velocity_y,speed,energy_current,energy_max,energy_ratio,age,size,organism_type,behavior_state,state_time,target_x,target_y,target_entity,sensory_range,aggression,boldness"
                     ).expect("Failed to write CSV header");
-                    writer.flush().expect("Failed to flush CSV writer");
                 }
                 
                 // Extract target coordinates
@@ -580,7 +605,10 @@ pub fn log_tracked_organism(
                     boldness
                 ).expect("Failed to write CSV row");
                 
-                writer.flush().expect("Failed to flush CSV writer");
+                // Flush every 10 writes instead of every write (reduces I/O overhead)
+                if tick % 100 == 0 {
+                    writer.flush().expect("Failed to flush CSV writer");
+                }
             }
             
             // Mark header as written after dropping writer borrow
