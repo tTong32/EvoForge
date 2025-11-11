@@ -1,22 +1,19 @@
-mod world;
-mod utils;
 mod organisms;
+mod utils;
+mod world;
 
 use bevy::prelude::*;
-use world::WorldPlugin;
 use organisms::OrganismPlugin;
 use tracing_subscriber::EnvFilter;
+use world::WorldPlugin;
 
 fn main() {
     // Initialize tracing subscriber for better error visibility
     // Default to INFO level if RUST_LOG is not set
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"));
-    
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .init();
-    
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+
+    tracing_subscriber::fmt().with_env_filter(filter).init();
+
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
@@ -35,7 +32,7 @@ fn main() {
 
 fn setup(mut commands: Commands) {
     commands.spawn(Camera2dBundle::default());
-    
+
     info!("Evolution Simulator initialized");
     info!("Core framework ready");
 }
@@ -44,4 +41,3 @@ fn update_simulation(_time: Res<Time>) {
     // Placeholder for simulation tick updates
     // This will be replaced with proper simulation loop
 }
-

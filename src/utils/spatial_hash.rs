@@ -41,7 +41,7 @@ impl SpatialHash {
     /// Insert an entity at a position
     pub fn insert(&mut self, entity: Entity, position: Vec2) {
         let bucket = self.world_to_bucket(position);
-        
+
         // Remove from old bucket if it exists
         if let Some(old_bucket) = self.entity_buckets.remove(&entity) {
             if let Some(bucket_vec) = self.buckets.get_mut(&old_bucket) {
@@ -51,9 +51,12 @@ impl SpatialHash {
                 }
             }
         }
-        
+
         // Add to new bucket
-        self.buckets.entry(bucket).or_insert_with(Vec::new).push(entity);
+        self.buckets
+            .entry(bucket)
+            .or_insert_with(Vec::new)
+            .push(entity);
         self.entity_buckets.insert(entity, bucket);
     }
 
@@ -74,9 +77,9 @@ impl SpatialHash {
     pub fn query_radius(&self, position: Vec2, radius: f32) -> Vec<Entity> {
         let center_bucket = self.world_to_bucket(position);
         let radius_buckets = (radius / self.cell_size).ceil() as i32;
-        
+
         let mut results = Vec::new();
-        
+
         // Check all buckets within radius
         for dy in -radius_buckets..=radius_buckets {
             for dx in -radius_buckets..=radius_buckets {
@@ -86,7 +89,7 @@ impl SpatialHash {
                 }
             }
         }
-        
+
         results
     }
 
@@ -117,4 +120,3 @@ impl Default for SpatialHashGrid {
         }
     }
 }
-

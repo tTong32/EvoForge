@@ -23,7 +23,7 @@ impl Genome {
         }
         Self { genes }
     }
-    
+
     /// Create a genome with specific genes
     pub fn new(genes: Vec<f32>) -> Self {
         let mut genome = SmallVec::new();
@@ -36,7 +36,7 @@ impl Genome {
         }
         Self { genes: genome }
     }
-    
+
     /// Get a gene value (clamped to valid range)
     pub fn get_gene(&self, index: usize) -> f32 {
         if index < self.genes.len() {
@@ -45,23 +45,23 @@ impl Genome {
             0.5 // Default value
         }
     }
-    
+
     /// Set a gene value (clamped to valid range)
     pub fn set_gene(&mut self, index: usize, value: f32) {
         if index < self.genes.len() {
             self.genes[index] = value.clamp(0.0, 1.0);
         }
     }
-    
+
     /// Clone genome with optional mutations
     /// Optimized: Uses faster uniform mutation instead of expensive Box-Muller transform
     pub fn clone_with_mutation(&self, mutation_rate: f32) -> Self {
         let mut new_genes = SmallVec::new();
         let mut rng = fastrand::Rng::new();
-        
+
         for &gene in self.genes.iter() {
             let mut new_gene = gene;
-            
+
             // Apply mutation with probability
             if rng.f32() < mutation_rate {
                 // Uniform mutation: add random value in range [-0.1, 0.1]
@@ -69,54 +69,50 @@ impl Genome {
                 let mutation = (rng.f32() - 0.5) * 0.2;
                 new_gene = (new_gene + mutation).clamp(0.0, 1.0);
             }
-            
+
             new_genes.push(new_gene);
         }
-        
+
         Self { genes: new_genes }
     }
-    
+
     /// Crossover two genomes (sexual reproduction)
     /// Optimized: Uses faster uniform mutation instead of expensive Box-Muller transform
     pub fn crossover(parent_a: &Genome, parent_b: &Genome, mutation_rate: f32) -> Self {
         let mut rng = fastrand::Rng::new();
         let mut new_genes = SmallVec::new();
-        
+
         // Uniform crossover: for each gene, randomly choose from parent A or B
         for i in 0..GENOME_SIZE {
             let gene_a = parent_a.get_gene(i);
             let gene_b = parent_b.get_gene(i);
-            
+
             // 50/50 chance to choose from each parent
-            let mut new_gene = if rng.bool() {
-                gene_a
-            } else {
-                gene_b
-            };
-            
+            let mut new_gene = if rng.bool() { gene_a } else { gene_b };
+
             // Apply mutation with probability
             if rng.f32() < mutation_rate {
                 // Uniform mutation: add random value in range [-0.1, 0.1]
                 let mutation = (rng.f32() - 0.5) * 0.2;
                 new_gene = (new_gene + mutation).clamp(0.0, 1.0);
             }
-            
+
             new_genes.push(new_gene);
         }
-        
+
         Self { genes: new_genes }
     }
-    
+
     /// Calculate genetic distance between two genomes (for speciation)
     pub fn distance(&self, other: &Genome) -> f32 {
         let mut sum = 0.0;
         let min_len = self.genes.len().min(other.genes.len());
-        
+
         for i in 0..min_len {
             let diff = (self.genes[i] - other.genes[i]).abs();
             sum += diff * diff; // Squared difference
         }
-        
+
         (sum / min_len as f32).sqrt() // Root mean squared difference
     }
 }
@@ -125,101 +121,235 @@ impl Genome {
 /// Each trait is encoded by one or more genes
 pub mod traits {
     use super::*;
-    
-    /// Speed trait (how fast the organism can move)
+
+    /// Helper: convert a [0,1] gene value into [-1,1]
+    fn gene_to_signed(value: f32) -> f32 {
+        (value * 2.0) - 1.0
+    }
+
+    /// Helper: sigmoid activation for smoother response curves
+    fn sigmoid(x: f32) -> f32 {
+        1.0 / (1.0 + (-x).exp())
+    }
+
+    /// Maps a weighted sum of genes into the desired output range.
+    fn express_with_weights(
+        genome: &Genome,
+        weights: &[(usize, f32)],
+        bias: f32,
+        min: f32,
+        max: f32,
+    ) -> f32 {
+        let mut sum = bias;
+        for (index, weight) in weights {
+            let gene_value = genome.get_gene(*index);
+            sum += gene_to_signed(gene_value) * *weight;
+        }
+
+        let normalized = sigmoid(sum.clamp(-6.0, 6.0));
+        min + normalized * (max - min)
+    }
+
+    /// Base trait indices (primary drivers)
     pub const SPEED: usize = 0;
-    
-    /// Size trait (affects metabolism, collision, etc.)
     pub const SIZE: usize = 1;
-    
-    /// Base metabolic rate trait
     pub const METABOLISM_RATE: usize = 2;
-    
-    /// Movement cost trait
     pub const MOVEMENT_COST: usize = 3;
-    
-    /// Maximum energy trait
     pub const MAX_ENERGY: usize = 4;
-    
-    /// Reproduction cooldown trait
     pub const REPRODUCTION_COOLDOWN: usize = 5;
-    
-    /// Reproduction threshold trait (energy level needed to reproduce)
     pub const REPRODUCTION_THRESHOLD: usize = 6;
-    
-    /// Sensory range trait (how far organism can sense)
     pub const SENSORY_RANGE: usize = 7;
-    
-    /// Aggression trait (for future behavior)
     pub const AGGRESSION: usize = 8;
-    
-    /// Boldness trait (for future behavior)
     pub const BOLDNESS: usize = 9;
-    
-    /// Remaining genes reserved for future traits
-    /// (genes 10-31 available for future expansion)
-    
-    /// Express a trait from genome using sigmoid activation
-    /// Maps gene value [0.0, 1.0] to trait range [min, max]
-    pub fn express_trait(genome: &Genome, gene_index: usize, min: f32, max: f32) -> f32 {
-        let gene_value = genome.get_gene(gene_index);
-        // Linear interpolation (can be changed to sigmoid for non-linear)
-        min + gene_value * (max - min)
-    }
-    
-    /// Express speed trait (0.5 to 20.0 units/sec)
+
+    /// Modifier genes enabling richer expression
+    pub const SPEED_FAST_TWITCH: usize = 10;
+    pub const SPEED_ENDURANCE: usize = 11;
+    pub const STRUCTURAL_DENSITY: usize = 12;
+    pub const METABOLIC_FLEXIBILITY: usize = 13;
+    pub const REPRODUCTIVE_INVESTMENT: usize = 14;
+    pub const SENSORY_FOCUS: usize = 15;
+    pub const SOCIAL_SENSITIVITY: usize = 16;
+    pub const THERMAL_TOLERANCE: usize = 17;
+    pub const MUTATION_CONTROL: usize = 18;
+    pub const DEVELOPMENTAL_PLASTICITY: usize = 19;
+
+    /// Express speed trait (0.5 to 20.0 units/sec) using multiple genes.
     pub fn express_speed(genome: &Genome) -> f32 {
-        express_trait(genome, SPEED, 0.5, 20.0)
+        express_with_weights(
+            genome,
+            &[
+                (SPEED, 1.4),
+                (SPEED_FAST_TWITCH, 0.9),
+                (SPEED_ENDURANCE, 0.6),
+                (METABOLISM_RATE, 0.3),
+                (STRUCTURAL_DENSITY, -0.6),
+            ],
+            0.1,
+            0.5,
+            20.0,
+        )
     }
-    
-    /// Express size trait (0.3 to 3.0 units)
+
+    /// Express size trait (0.3 to 3.0 units) with structural modifiers.
     pub fn express_size(genome: &Genome) -> f32 {
-        express_trait(genome, SIZE, 0.3, 3.0)
+        express_with_weights(
+            genome,
+            &[
+                (SIZE, 1.2),
+                (STRUCTURAL_DENSITY, 0.8),
+                (DEVELOPMENTAL_PLASTICITY, 0.4),
+                (METABOLISM_RATE, -0.4),
+            ],
+            0.0,
+            0.3,
+            3.0,
+        )
     }
-    
-    /// Express metabolism rate trait (0.005 to 0.02 per second)
+
+    /// Express metabolism rate trait (0.003 to 0.03 per second).
     pub fn express_metabolism_rate(genome: &Genome) -> f32 {
-        express_trait(genome, METABOLISM_RATE, 0.005, 0.02)
+        express_with_weights(
+            genome,
+            &[
+                (METABOLISM_RATE, 1.1),
+                (METABOLIC_FLEXIBILITY, 0.7),
+                (SPEED_ENDURANCE, 0.4),
+                (STRUCTURAL_DENSITY, -0.3),
+            ],
+            0.0,
+            0.003,
+            0.03,
+        )
     }
-    
-    /// Express movement cost trait (0.01 to 0.1)
+
+    /// Express movement cost trait (0.008 to 0.12).
     pub fn express_movement_cost(genome: &Genome) -> f32 {
-        express_trait(genome, MOVEMENT_COST, 0.01, 0.1)
+        express_with_weights(
+            genome,
+            &[
+                (MOVEMENT_COST, 1.0),
+                (SIZE, 0.6),
+                (STRUCTURAL_DENSITY, 0.5),
+                (METABOLIC_FLEXIBILITY, -0.5),
+            ],
+            0.2,
+            0.008,
+            0.12,
+        )
     }
-    
-    /// Express max energy trait (30.0 to 150.0)
+
+    /// Express max energy trait (40.0 to 220.0).
     pub fn express_max_energy(genome: &Genome) -> f32 {
-        express_trait(genome, MAX_ENERGY, 30.0, 150.0)
+        express_with_weights(
+            genome,
+            &[
+                (MAX_ENERGY, 1.2),
+                (SIZE, 0.7),
+                (METABOLISM_RATE, -0.5),
+                (THERMAL_TOLERANCE, 0.3),
+            ],
+            0.0,
+            40.0,
+            220.0,
+        )
     }
-    
-    /// Express reproduction cooldown trait (500 to 2000 ticks)
-    /// Higher values = longer between reproductions
+
+    /// Express reproduction cooldown trait (350 to 2400 ticks).
     pub fn express_reproduction_cooldown(genome: &Genome) -> f32 {
-        express_trait(genome, REPRODUCTION_COOLDOWN, 500.0, 2000.0)
+        express_with_weights(
+            genome,
+            &[
+                (REPRODUCTION_COOLDOWN, 1.0),
+                (REPRODUCTIVE_INVESTMENT, 0.9),
+                (METABOLISM_RATE, -0.4),
+                (DEVELOPMENTAL_PLASTICITY, 0.5),
+            ],
+            0.0,
+            350.0,
+            2400.0,
+        )
     }
-    
-    /// Express reproduction threshold trait (0.5 to 0.9 energy ratio)
-    /// Higher values = need more energy to reproduce
+
+    /// Express reproduction threshold trait (0.45 to 0.95 energy ratio).
     pub fn express_reproduction_threshold(genome: &Genome) -> f32 {
-        express_trait(genome, REPRODUCTION_THRESHOLD, 0.5, 0.9)
+        express_with_weights(
+            genome,
+            &[
+                (REPRODUCTION_THRESHOLD, 1.0),
+                (REPRODUCTIVE_INVESTMENT, 0.8),
+                (MAX_ENERGY, 0.3),
+                (METABOLIC_FLEXIBILITY, -0.5),
+            ],
+            0.2,
+            0.45,
+            0.95,
+        )
     }
-    
-    /// Express sensory range trait (5.0 to 50.0 units)
+
+    /// Express sensory range trait (6.0 to 65.0 units).
     pub fn express_sensory_range(genome: &Genome) -> f32 {
-        express_trait(genome, SENSORY_RANGE, 5.0, 50.0)
+        express_with_weights(
+            genome,
+            &[
+                (SENSORY_RANGE, 1.0),
+                (SENSORY_FOCUS, 0.8),
+                (SOCIAL_SENSITIVITY, 0.6),
+                (THERMAL_TOLERANCE, -0.3),
+            ],
+            0.1,
+            6.0,
+            65.0,
+        )
     }
-    
-    /// Express aggression trait (for behavior decisions)
+
+    /// Express aggression trait (0.0 to 1.0).
     pub fn express_aggression(genome: &Genome) -> f32 {
-        express_trait(genome, AGGRESSION, 0.0, 1.0)
+        express_with_weights(
+            genome,
+            &[
+                (AGGRESSION, 1.0),
+                (SPEED_FAST_TWITCH, 0.4),
+                (SENSORY_FOCUS, 0.2),
+                (SOCIAL_SENSITIVITY, -0.6),
+            ],
+            0.0,
+            0.0,
+            1.0,
+        )
     }
-    
-    /// Express boldness trait (for behavior decisions)
+
+    /// Express boldness trait (0.0 to 1.0).
     pub fn express_boldness(genome: &Genome) -> f32 {
-        express_trait(genome, BOLDNESS, 0.0, 1.0)
+        express_with_weights(
+            genome,
+            &[
+                (BOLDNESS, 1.0),
+                (REPRODUCTIVE_INVESTMENT, 0.5),
+                (THERMAL_TOLERANCE, 0.3),
+                (SOCIAL_SENSITIVITY, -0.4),
+            ],
+            0.0,
+            0.0,
+            1.0,
+        )
+    }
+
+    /// Express mutation rate trait (0.002 to 0.06 probability per gene).
+    pub fn express_mutation_rate(genome: &Genome) -> f32 {
+        express_with_weights(
+            genome,
+            &[
+                (MUTATION_CONTROL, 1.2),
+                (DEVELOPMENTAL_PLASTICITY, 0.6),
+                (METABOLIC_FLEXIBILITY, 0.3),
+            ],
+            -0.2,
+            0.002,
+            0.06,
+        )
     }
 }
 
 /// Default mutation rate (probability of mutation per gene)
-pub const DEFAULT_MUTATION_RATE: f32 = 0.01; // 1% chance per gene
-
+pub const DEFAULT_MUTATION_RATE: f32 = 0.01; // Backwards-compatible baseline

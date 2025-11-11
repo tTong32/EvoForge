@@ -73,7 +73,7 @@ impl Chunk {
         self.dirty = false;
         self.dirty_cells.clear();
     }
-    
+
     /// Get dirty cells in this chunk
     pub fn get_dirty_cells(&self) -> &std::collections::HashSet<(usize, usize)> {
         &self.dirty_cells
@@ -90,4 +90,3 @@ impl Chunk {
         &mut self.cells
     }
 }
-

@@ -1,7 +1,7 @@
+use crate::world::cell::Cell;
+use crate::world::chunk::Chunk;
 use bevy::prelude::*;
 use std::collections::HashMap;
-use crate::world::chunk::Chunk;
-use crate::world::cell::Cell;
 
 /// The world grid manages chunks in a sparse storage system
 /// Only active chunks are kept in memory for efficiency
@@ -38,7 +38,7 @@ impl WorldGrid {
     pub fn get_cell(&self, world_x: f32, world_y: f32) -> Option<&Cell> {
         let (chunk_x, chunk_y) = Chunk::world_to_chunk(world_x, world_y);
         let (local_x, local_y) = Chunk::world_to_local(world_x, world_y);
-        
+
         self.get_chunk(chunk_x, chunk_y)
             .and_then(|chunk| chunk.get_cell(local_x, local_y))
     }
@@ -47,7 +47,7 @@ impl WorldGrid {
     pub fn get_cell_mut(&mut self, world_x: f32, world_y: f32) -> Option<&mut Cell> {
         let (chunk_x, chunk_y) = Chunk::world_to_chunk(world_x, world_y);
         let (local_x, local_y) = Chunk::world_to_local(world_x, world_y);
-        
+
         let chunk = self.get_or_create_chunk(chunk_x, chunk_y);
         chunk.get_cell_mut(local_x, local_y)
     }
@@ -84,4 +84,3 @@ impl WorldGrid {
         self.chunks.remove(&(chunk_x, chunk_y));
     }
 }
-

@@ -23,12 +23,12 @@ pub const REGENERATION_RATES: [[f32; RESOURCE_TYPE_COUNT]; 8] = [
 
 /// Resource decay rates (how quickly resources disappear)
 pub const DECAY_RATES: [f32; RESOURCE_TYPE_COUNT] = [
-    0.01,  // Plant - slow decay
-    0.0,   // Mineral - doesn't decay
-    0.1,   // Sunlight - very fast decay (needs constant regeneration)
-    0.02,  // Water - slow decay (evaporation)
-    0.05,  // Detritus - medium decay (decomposition)
-    0.03,  // Prey - medium decay (moves away or dies)
+    0.01, // Plant - slow decay
+    0.0,  // Mineral - doesn't decay
+    0.1,  // Sunlight - very fast decay (needs constant regeneration)
+    0.02, // Water - slow decay (evaporation)
+    0.05, // Detritus - medium decay (decomposition)
+    0.03, // Prey - medium decay (moves away or dies)
 ];
 
 /// Maximum resource capacity per cell
@@ -45,12 +45,12 @@ pub fn temperature_regeneration_multiplier(temperature: f32) -> f32 {
 /// Resource regeneration rate multiplier based on humidity
 pub fn humidity_regeneration_multiplier(humidity: f32, resource_type: ResourceType) -> f32 {
     match resource_type {
-        ResourceType::Plant => 0.5 + humidity * 0.5,      // Plants like humidity
-        ResourceType::Water => humidity,                   // Water depends on humidity
-        ResourceType::Sunlight => 1.0,                    // Sunlight independent
-        ResourceType::Mineral => 1.0,                     // Mineral independent
-        ResourceType::Detritus => 0.5 + humidity * 0.5,  // Detritus decomposes faster with moisture
-        ResourceType::Prey => 0.3 + humidity * 0.7,     // Prey prefers moderate humidity
+        ResourceType::Plant => 0.5 + humidity * 0.5, // Plants like humidity
+        ResourceType::Water => humidity,             // Water depends on humidity
+        ResourceType::Sunlight => 1.0,               // Sunlight independent
+        ResourceType::Mineral => 1.0,                // Mineral independent
+        ResourceType::Detritus => 0.5 + humidity * 0.5, // Detritus decomposes faster with moisture
+        ResourceType::Prey => 0.3 + humidity * 0.7,  // Prey prefers moderate humidity
     }
 }
 
@@ -58,7 +58,7 @@ pub fn humidity_regeneration_multiplier(humidity: f32, resource_type: ResourceTy
 pub fn regenerate_resources(cell: &mut Cell, dt: f32) {
     let terrain_idx = cell.terrain as usize;
     let temp_mult = temperature_regeneration_multiplier(cell.temperature);
-    
+
     for (resource_idx, &regeneration_rate) in REGENERATION_RATES[terrain_idx].iter().enumerate() {
         let resource_type = match resource_idx {
             0 => ResourceType::Plant,
@@ -69,10 +69,10 @@ pub fn regenerate_resources(cell: &mut Cell, dt: f32) {
             5 => ResourceType::Prey,
             _ => continue,
         };
-        
+
         let humidity_mult = humidity_regeneration_multiplier(cell.humidity, resource_type);
         let effective_rate = regeneration_rate * temp_mult * humidity_mult;
-        
+
         let current = cell.resource_density[resource_idx];
         let new_value = (current + effective_rate * dt).min(MAX_RESOURCE_DENSITY);
         cell.resource_density[resource_idx] = new_value;
@@ -97,4 +97,3 @@ pub fn quantize_resources(cell: &mut Cell, threshold: f32) {
         }
     }
 }
-

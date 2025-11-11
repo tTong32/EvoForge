@@ -1,5 +1,4 @@
 /// Utility functions and helpers for the simulation
-
 pub mod spatial_hash;
 pub use spatial_hash::*;
 
@@ -46,4 +45,3 @@ pub mod math {
         t * t * (3.0 - 2.0 * t)
     }
 }
-

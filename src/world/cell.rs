@@ -91,4 +91,3 @@ pub enum ResourceType {
 }
 
 pub const RESOURCE_TYPE_COUNT: usize = 6;
-

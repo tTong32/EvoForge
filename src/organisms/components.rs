@@ -9,15 +9,15 @@ impl Position {
     pub fn new(x: f32, y: f32) -> Self {
         Self(Vec2::new(x, y))
     }
-    
+
     pub fn x(&self) -> f32 {
         self.0.x
     }
-    
+
     pub fn y(&self) -> f32 {
         self.0.y
     }
-    
+
     pub fn as_vec2(&self) -> Vec2 {
         self.0
     }
@@ -31,7 +31,7 @@ impl Velocity {
     pub fn new(x: f32, y: f32) -> Self {
         Self(Vec2::new(x, y))
     }
-    
+
     pub fn zero() -> Self {
         Self(Vec2::ZERO)
     }
@@ -46,19 +46,16 @@ pub struct Energy {
 
 impl Energy {
     pub fn new(max: f32) -> Self {
-        Self {
-            current: max,
-            max,
-        }
+        Self { current: max, max }
     }
-    
+
     pub fn with_energy(max: f32, current: f32) -> Self {
         Self {
             current: current.min(max),
             max,
         }
     }
-    
+
     pub fn ratio(&self) -> f32 {
         if self.max > 0.0 {
             self.current / self.max
@@ -66,7 +63,7 @@ impl Energy {
             0.0
         }
     }
-    
+
     pub fn is_dead(&self) -> bool {
         self.current <= 0.0
     }
@@ -80,11 +77,11 @@ impl Age {
     pub fn new() -> Self {
         Self(0)
     }
-    
+
     pub fn increment(&mut self) {
         self.0 += 1;
     }
-    
+
     pub fn ticks(&self) -> u32 {
         self.0
     }
@@ -98,7 +95,7 @@ impl Size {
     pub fn new(size: f32) -> Self {
         Self(size)
     }
-    
+
     pub fn value(&self) -> f32 {
         self.0
     }
@@ -120,12 +117,12 @@ impl Metabolism {
             movement_cost,
         }
     }
-    
+
     /// Default metabolism for a basic organism
     pub fn default() -> Self {
         Self {
-            base_rate: 0.01,  // 1% max energy per second
-            movement_cost: 0.05,  // Additional cost for movement
+            base_rate: 0.01,     // 1% max energy per second
+            movement_cost: 0.05, // Additional cost for movement
         }
     }
 }
@@ -138,7 +135,7 @@ impl SpeciesId {
     pub fn new(id: u32) -> Self {
         Self(id)
     }
-    
+
     pub fn value(&self) -> u32 {
         self.0
     }
@@ -174,6 +171,7 @@ pub struct CachedTraits {
     pub sensory_range: f32,
     pub aggression: f32,
     pub boldness: f32,
+    pub mutation_rate: f32,
 }
 
 impl CachedTraits {
@@ -190,6 +188,7 @@ impl CachedTraits {
             sensory_range: traits::express_sensory_range(genome),
             aggression: traits::express_aggression(genome),
             boldness: traits::express_boldness(genome),
+            mutation_rate: traits::express_mutation_rate(genome),
         }
     }
 }
@@ -198,19 +197,18 @@ impl ReproductionCooldown {
     pub fn new(ticks: u32) -> Self {
         Self(ticks)
     }
-    
+
     pub fn is_ready(&self) -> bool {
         self.0 == 0
     }
-    
+
     pub fn decrement(&mut self) {
         if self.0 > 0 {
             self.0 -= 1;
         }
     }
-    
+
     pub fn reset(&mut self, ticks: u32) {
         self.0 = ticks;
     }
 }
-
