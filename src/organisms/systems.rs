@@ -6,6 +6,7 @@ use crate::world::{ResourceType, WorldGrid};
 use bevy::prelude::*;
 use glam::Vec2;
 
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
@@ -196,21 +197,56 @@ pub fn spawn_initial_organisms(
     info!("Spawned {} organisms", spawn_count);
 }
 
+#[derive(Resource)]
+pub struct SpatialHashTracker {
+    previous_positions: HashMap<Entity, Vec2>,
+}
+ impl Default for SpatialHashTracker {
+    fn default() -> Self {
+        Self {
+            previous_positions: HashMap::new(),
+        }
+    }
+ }
+
 /// Update spatial hash grid with current organism positions
 pub fn update_spatial_hash(
     mut spatial_hash: ResMut<SpatialHashGrid>,
+    mut tracker: ResMut<SpatialHashTracker>,
     query: Query<(Entity, &Position), With<Alive>>,
+    mut removed: RemovedComponents<Alive>, // Entites that lost alive component
 ) {
-    // Clear and rebuild spatial hash each frame
-    spatial_hash.organisms.clear();
-
-    for (entity, position) in query.iter() {
-        spatial_hash.organisms.insert(entity, position.0);
+    for entity in removed.read() {
+        spatial_hash.organisms.remove(entity);
+        tracker.previous_positions.remove(&entity);
     }
+    // Update only the entities that have moved or are new
+    for (entity, position) in query.iter(){
+        let current_pos = position.0;
+
+        if let Some(old_pos) =tracker.previous_positions.get(&entity) {
+            // Only update if position changed significant (so avoid micro-updates)
+            if (current_pos - *old_pos).length_squared() > 0.01 {
+                spatial_hash.organisms.insert(entity, current_pos);
+                tracker.previous_positions.insert(entity, current_pos);
+            }
+        } else {
+            // New entity - insert
+            spatial_hash.organisms.insert(entity, current_pos);
+            tracker.previous_positions.insert(entity, current_pos);
+        }
+    }
+
+    // Finally, clean up entries that no longer exist (safety check)
+    tracker.previous_positions.retain(|entity, _| {
+        query.get(*entity).is_ok()
+    });
 }
 
 /// Update metabolism - organisms consume energy over time
 /// Uses cached traits if available, otherwise falls back to Metabolism component
+/// NOTE: Bevy's scheduler automatically parallelizes independent systems, so manual parallelization
+/// isn't needed here. The system itself will run in parallel with other independent systems.
 pub fn update_metabolism(
     mut query: Query<(
         &mut Energy,
@@ -268,6 +304,7 @@ pub fn update_behavior(
         (Entity, &Position, &SpeciesId, &OrganismType, &Size, &Energy),
         With<Alive>,
     >,
+    mut sensory_cache: ResMut<crate::organisms::behavior::SensoryDataCache>, // Add cache
     time: Res<Time>,
 ) {
     let dt = time.delta_seconds();
@@ -295,17 +332,22 @@ pub fn update_behavior(
         // Get sensory range from cached traits
         let sensory_range = cached_traits.sensory_range;
 
-        // Collect sensory data using spatial hash for efficient queries
-        let sensory = collect_sensory_data(
+        // Collect sensory data using cache (optimization 3)
+        let sensory = sensory_cache.get_or_compute(
             entity,
             position.0,
             sensory_range,
-            *species_id,
-            *organism_type,
-            size.value(),
-            &world_grid,
-            &spatial_hash.organisms,
-            &organism_query,
+            || collect_sensory_data(
+                entity,
+                position.0,
+                sensory_range,
+                *species_id,
+                *organism_type,
+                size.value(),
+                &world_grid,
+                &spatial_hash.organisms,
+                &organism_query,
+            )
         );
 
         if let Some((_, threat_pos, _)) = sensory.nearest_predator {
@@ -525,6 +567,7 @@ pub fn handle_eating(
 }
 
 /// Update organism age and reproduction cooldown
+/// NOTE: Bevy's scheduler automatically parallelizes independent systems
 pub fn update_age(mut query: Query<(&mut Age, &mut ReproductionCooldown)>) {
     for (mut age, mut cooldown) in query.iter_mut() {
         age.increment();

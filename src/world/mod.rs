@@ -8,6 +8,7 @@ mod terrain;
 use bevy::prelude::*;
 use bevy::time::Time;
 use glam::Vec2;
+use std::collections::HashSet;
 
 pub use cell::Cell;
 pub use cell::{ResourceType, TerrainType};
@@ -17,17 +18,59 @@ pub use grid::WorldGrid;
 pub use resources::*;
 pub use terrain::*;
 
+/// Track which chunks/cells need updates (optimization 2)
+#[derive(Resource, Default)]
+pub struct DirtyChunks {
+    /// Chunks that are dirty and need full updates
+    dirty_chunks: HashSet<(i32, i32)>,
+    /// Cells with organisms nearby (update these more frequently)
+    active_cells: HashSet<((i32, i32), (usize, usize))>, // ((chunk_x, chunk_y), (cell_x, cell_y))
+    /// Frame counter for cache decay
+    frame_counter: u32,
+}
+
+impl DirtyChunks {
+    pub fn mark_chunk_dirty(&mut self, chunk_x: i32, chunk_y: i32) {
+        self.dirty_chunks.insert((chunk_x, chunk_y));
+    }
+    
+    pub fn mark_cell_active(&mut self, chunk_x: i32, chunk_y: i32, cell_x: usize, cell_y: usize) {
+        self.active_cells.insert(((chunk_x, chunk_y), (cell_x, cell_y)));
+    }
+    
+    pub fn should_update_cell(&self, chunk_x: i32, chunk_y: i32, cell_x: usize, cell_y: usize) -> bool {
+        // Update if chunk is dirty OR cell is active
+        self.dirty_chunks.contains(&(chunk_x, chunk_y)) 
+            || self.active_cells.contains(&((chunk_x, chunk_y), (cell_x, cell_y)))
+    }
+    
+    pub fn clear_dirty_chunks(&mut self) {
+        self.dirty_chunks.clear();
+    }
+    
+    pub fn decay_active_cells(&mut self) {
+        // Every 10 frames, reduce active cells to only those near organisms
+        self.frame_counter += 1;
+        if self.frame_counter % 10 == 0 {
+            // Keep active cells for tracking, but this could be further optimized
+            // For now, we'll keep them and let mark_active_chunks refresh them
+        }
+    }
+}
+
 pub struct WorldPlugin;
 
 impl Plugin for WorldPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<WorldGrid>()
             .init_resource::<ClimateState>()
+            .init_resource::<DirtyChunks>()
             .add_systems(Startup, initialize_world)
             .add_systems(
                 Update,
                 (
                     update_climate,
+                    mark_active_chunks,
                     update_chunks,
                     regenerate_and_decay_resources,
                     flow_resources,
@@ -59,23 +102,62 @@ fn update_climate(mut climate: ResMut<ClimateState>, time: Res<Time>) {
     climate.update(time.delta_seconds());
 }
 
+/// Mark chunks/cells as active based on organism positions
+fn mark_active_chunks(
+    mut dirty_chunks: ResMut<DirtyChunks>,
+    organism_query: Query<&crate::organisms::Position, With<crate::organisms::Alive>>,
+) {
+    const ACTIVE_RANGE: f32 = 10.0; // Cells within this range of organisms are "active"
+    dirty_chunks.active_cells.clear(); // Refresh active cells each frame
+    
+    for position in organism_query.iter() {
+        let world_x = position.x();
+        let world_y = position.y();
+        
+        // Find all cells within active range
+        let cell_size = 1.0;
+        let range_cells = (ACTIVE_RANGE / cell_size).ceil() as i32;
+        
+        for dy in -range_cells..=range_cells {
+            for dx in -range_cells..=range_cells {
+                let check_x = world_x + (dx as f32 * cell_size);
+                let check_y = world_y + (dy as f32 * cell_size);
+                let distance = Vec2::new(dx as f32, dy as f32).length() * cell_size;
+                
+                if distance <= ACTIVE_RANGE {
+                    let (chunk_x, chunk_y) = crate::world::chunk::Chunk::world_to_chunk(check_x, check_y);
+                    let (cell_x, cell_y) = crate::world::chunk::Chunk::world_to_local(check_x, check_y);
+                    dirty_chunks.mark_cell_active(chunk_x, chunk_y, cell_x, cell_y);
+                }
+            }
+        }
+    }
+    
+    dirty_chunks.decay_active_cells();
+}
+
 /// Update all chunks: climate and resource regeneration/decay
-/// Optimized: Only updates dirty cells and cells near organisms
-fn update_chunks(mut world_grid: ResMut<WorldGrid>, climate: Res<ClimateState>) {
+/// OPTIMIZED: Only updates dirty cells and cells near organisms
+fn update_chunks(
+    mut world_grid: ResMut<WorldGrid>, 
+    climate: Res<ClimateState>,
+    dirty_chunks: Res<DirtyChunks>,
+) {
     let chunk_coords: Vec<_> = world_grid.get_chunk_coords();
 
     for (chunk_x, chunk_y) in chunk_coords {
         if let Some(chunk) = world_grid.get_chunk_mut(chunk_x, chunk_y) {
-            // Update climate for all cells (climate changes affect all cells)
-            // In future, we could optimize this to only update cells that changed significantly
+            // Only update climate for active cells or if chunk is dirty
             for y in 0..crate::world::chunk::CHUNK_SIZE {
                 for x in 0..crate::world::chunk::CHUNK_SIZE {
-                    if let Some(cell) = chunk.get_cell_mut(x, y) {
-                        let world_pos = Vec2::new(
-                            chunk_x as f32 * crate::world::chunk::CHUNK_SIZE as f32 + x as f32,
-                            chunk_y as f32 * crate::world::chunk::CHUNK_SIZE as f32 + y as f32,
-                        );
-                        climate::update_cell_climate(cell, climate.as_ref(), world_pos);
+                    if dirty_chunks.should_update_cell(chunk_x, chunk_y, x, y) {
+                        if let Some(cell) = chunk.get_cell_mut(x, y) {
+                            let world_pos = Vec2::new(
+                                chunk_x as f32 * crate::world::chunk::CHUNK_SIZE as f32 + x as f32,
+                                chunk_y as f32 * crate::world::chunk::CHUNK_SIZE as f32 + y as f32,
+                            );
+                            climate::update_cell_climate(cell, climate.as_ref(), world_pos);
+                        }
                     }
                 }
             }
@@ -84,26 +166,32 @@ fn update_chunks(mut world_grid: ResMut<WorldGrid>, climate: Res<ClimateState>) 
 }
 
 /// Regenerate and decay resources in all chunks
-/// Optimized: Processes all cells but could be further optimized with dirty tracking
-fn regenerate_and_decay_resources(mut world_grid: ResMut<WorldGrid>, time: Res<Time>) {
+/// OPTIMIZED: Sparse updates - only process cells with resources or near organisms
+fn regenerate_and_decay_resources(
+    mut world_grid: ResMut<WorldGrid>, 
+    time: Res<Time>,
+    dirty_chunks: Res<DirtyChunks>,
+) {
     let dt = time.delta_seconds();
     let chunk_coords: Vec<_> = world_grid.get_chunk_coords();
 
     for (chunk_x, chunk_y) in chunk_coords {
         if let Some(chunk) = world_grid.get_chunk_mut(chunk_x, chunk_y) {
-            // Process all cells (resource regeneration/decay affects all cells)
-            // Future optimization: only process cells with active resources or near organisms
             for y in 0..crate::world::chunk::CHUNK_SIZE {
                 for x in 0..crate::world::chunk::CHUNK_SIZE {
-                    if let Some(cell) = chunk.get_cell_mut(x, y) {
-                        // Regenerate resources
-                        resources::regenerate_resources(cell, dt);
-
-                        // Decay resources
-                        resources::decay_resources(cell, dt);
-
-                        // Quantize small values
-                        resources::quantize_resources(cell, 0.001);
+                    if dirty_chunks.should_update_cell(chunk_x, chunk_y, x, y) {
+                        if let Some(cell) = chunk.get_cell_mut(x, y) {
+                            // Check if cell has any meaningful resources first
+                            let has_resources = (0..crate::world::cell::RESOURCE_TYPE_COUNT)
+                                .any(|i| cell.resource_density[i] > 0.001);
+                            
+                            // Only update if cell has resources OR is active (near organisms)
+                            if has_resources || dirty_chunks.active_cells.contains(&((chunk_x, chunk_y), (x, y))) {
+                                resources::regenerate_resources(cell, dt);
+                                resources::decay_resources(cell, dt);
+                                resources::quantize_resources(cell, 0.001);
+                            }
+                        }
                     }
                 }
             }

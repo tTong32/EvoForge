@@ -14,7 +14,9 @@ impl Plugin for OrganismPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<systems::TrackedOrganism>()
             .init_resource::<systems::AllOrganismsLogger>()
+            .init_resource::<systems::SpatialHashTracker>()
             .init_resource::<crate::utils::SpatialHashGrid>()
+            .init_resource::<behavior::SensoryDataCache>() // Add sensory cache (optimization 3)
             .add_systems(Startup, systems::spawn_initial_organisms)
             .add_systems(
                 Update,

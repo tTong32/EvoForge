@@ -8,7 +8,7 @@ This document summarizes all major systems, dependencies, and development milest
 ## 🧱 Core Vision
 
 - **Goal:** Simulate natural selection and ecological interactions in a scalable virtual world.  
-- **Scale:** 100,000 – 1,000,000 agents across a 2D world divided into evolving biomes.  
+- **Scale:** 1200-1500 agents across a 2D world divided into evolving biomes.  
 - **Language Stack:**  
   - **Backend:** Rust (performance, memory safety, parallelism)  
   - **Frontend / Visualization:** Rust+Bevy (for interactive visualization)  

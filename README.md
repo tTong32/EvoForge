@@ -4,14 +4,16 @@ A modular, open-ended simulation of biological evolution and ecosystems featurin
 
 ## 🚀 Current Status
 
-**Step 1: Core Framework** ✅ **COMPLETE**
+**Steps 1-7: Core Systems** ✅ **COMPLETE**
 
-The core framework has been established with:
-- ✅ Project structure with Cargo.toml and dependencies
-- ✅ Bevy ECS framework integration
-- ✅ World grid system with sparse chunk storage
-- ✅ Cell and Chunk data structures
-- ✅ Basic plugin architecture
+The simulation now includes:
+- ✅ **Step 1: Core Framework** - Project structure, Bevy ECS, world grid, chunks, cells
+- ✅ **Step 2: World & Resource Simulation** - Climate system, resource regeneration, terrain
+- ✅ **Step 3: Organisms (Basic)** - Organism components, spawning, metabolism, energy
+- ✅ **Step 4: Genetics & Reproduction** - Genome encoding, mutation, crossover, trait expression
+- ✅ **Step 5: Behavior System** - State machine, decision-making, sensory data, memory
+- ✅ **Step 6: Resource-Organism Interaction** - Eating, metabolism, energy flow
+- ✅ **Step 7: Visualization & Logging** - Real-time rendering, CSV logging, camera controls
 
 ## 📁 Project Structure
 
@@ -24,13 +26,27 @@ evolution-sim/
 │   │   ├── mod.rs          # World plugin and module exports
 │   │   ├── cell.rs         # Cell data structure (environment, resources)
 │   │   ├── chunk.rs        # Chunk management (64x64 cells)
-│   │   └── grid.rs         # Sparse world grid with HashMap storage
+│   │   ├── grid.rs         # Sparse world grid with HashMap storage
+│   │   ├── climate.rs      # Climate simulation
+│   │   ├── resources.rs    # Resource regeneration and flow
+│   │   └── terrain.rs      # Terrain generation
+│   ├── organisms/          # Organism system module
+│   │   ├── mod.rs          # Organism plugin
+│   │   ├── components.rs   # Organism components
+│   │   ├── genetics.rs     # Genome and trait expression
+│   │   ├── behavior.rs     # Behavior system and decision-making
+│   │   └── systems.rs      # Organism update systems
+│   ├── visualization/      # Visualization module
+│   │   ├── mod.rs          # Visualization plugin
+│   │   ├── organisms.rs    # Organism sprite rendering
+│   │   └── camera.rs       # Camera controls
 │   └── utils/              # Utility functions
-│       └── mod.rs          # Coordinate conversion, math utilities
+│       ├── mod.rs          # Coordinate conversion, math utilities
+│       └── spatial_hash.rs # Spatial hashing for efficient queries
 ├── data/
-│   ├── logs/               # Simulation logs (future)
-│   ├── configs/            # Configuration files (future)
-│   └── outputs/            # Output data (future)
+│   ├── logs/               # Simulation logs (CSV files)
+│   ├── configs/            # Configuration files
+│   └── outputs/            # Output data
 └── docs/
     └── PROJECT_OVERVIEW.md # Complete project documentation
 ```
@@ -70,17 +86,35 @@ cargo build --release
 cargo run
 ```
 
+## 🎮 Controls
+
+- **Arrow Keys / WASD**: Pan camera
+- **+ / -**: Zoom in/out
+- **0**: Reset zoom
+- **R**: Reset camera position
+
+## 👁️ Visualization
+
+The simulator displays organisms as colored sprites:
+- **Green**: Producers (plants, algae)
+- **Red**: Consumers (animals)
+- **Purple**: Decomposers (fungi, bacteria)
+
+Colors vary based on:
+- Energy level (brighter = more energy)
+- Species ID (slight hue variation)
+
 ## 📋 Next Steps
 
 Following the development timeline:
 
 1. ✅ **Core Framework** - Complete
-2. ⏭️ **World & Resource Simulation** - Implement terrain, resources, and climate updates
-3. ⏭️ **Organisms (Basic)** - Add agents with position, energy, metabolism, simple behavior
-4. ⏭️ **Genetics & Reproduction** - Add genome encoding, mutation, crossover
-5. ⏭️ **Behavior System** - Implement decision rules
-6. ⏭️ **Resource-Organism Interaction** - Link eating/metabolism with resource map
-7. ⏭️ **Visualization & Logging** - Add real-time data collection and map visualization
+2. ✅ **World & Resource Simulation** - Complete
+3. ✅ **Organisms (Basic)** - Complete
+4. ✅ **Genetics & Reproduction** - Complete
+5. ✅ **Behavior System** - Complete
+6. ✅ **Resource-Organism Interaction** - Complete
+7. ✅ **Visualization & Logging** - Complete
 8. ⏭️ **Emergent Ecosystem Tuning** - Tune rates until emergent biomes form
 9. ⏭️ **Advanced Systems** - Add speciation, climate events, disease, co-evolution
 10. ⏭️ **Performance Scaling** - Parallelize updates, optimize data layout

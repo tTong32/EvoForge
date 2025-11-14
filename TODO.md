@@ -1,0 +1,7 @@
+- There is no way to differentiate between species
+- There is barely any difference in the behaviours of consumers, composters and producers
+    - Should this be the case, and if so, perhaps two entirely different systems can be created instead
+    - I'm thinking that each cell should maintain its own producers and composters system
+    - If an herbivore wants to eat at the cell, it must check whether there's enough of what it can eat
+- There is logic that determines which species can eat which
+- currently, offspring spawn nearly instantly

@@ -1,10 +1,12 @@
 mod organisms;
 mod utils;
+mod visualization;
 mod world;
 
 use bevy::prelude::*;
 use organisms::OrganismPlugin;
 use tracing_subscriber::EnvFilter;
+use visualization::VisualizationPlugin;
 use world::WorldPlugin;
 
 fn main() {
@@ -25,6 +27,7 @@ fn main() {
         }))
         .add_plugins(WorldPlugin)
         .add_plugins(OrganismPlugin)
+        .add_plugins(VisualizationPlugin)
         .add_systems(Startup, setup)
         .add_systems(Update, update_simulation)
         .run();
