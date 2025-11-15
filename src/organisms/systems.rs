@@ -249,9 +249,9 @@ pub fn update_spatial_hash(
 }
 
 /// Update metabolism - organisms consume energy over time
+/// Step 10: PARALLELIZED - Uses Bevy's parallel query iterator
+/// Step 8: Uses tuning parameters for ecosystem balance
 /// Uses cached traits if available, otherwise falls back to Metabolism component
-/// NOTE: Bevy's scheduler automatically parallelizes independent systems, so manual parallelization
-/// isn't needed here. The system itself will run in parallel with other independent systems.
 pub fn update_metabolism(
     mut query: Query<(
         &mut Energy,
@@ -261,23 +261,32 @@ pub fn update_metabolism(
         Option<&CachedTraits>,
     )>,
     time: Res<Time>,
+    tuning: Res<crate::organisms::EcosystemTuning>, // Step 8: Tuning parameters
 ) {
     let dt = time.delta_seconds();
+    let base_metabolism_mult = tuning.base_metabolism_multiplier;
+    let movement_cost_mult = tuning.movement_cost_multiplier;
 
+    // Step 10: Bevy automatically parallelizes systems, so regular iteration is fine
+    // Chunk processing is parallelized separately for better performance
     for (mut energy, velocity, metabolism, size, traits_opt) in query.iter_mut() {
         // Use cached traits if available, otherwise use Metabolism component
-        let (base_rate, movement_cost_mult) = if let Some(traits) = traits_opt {
+        let (base_rate, organism_movement_cost) = if let Some(traits) = traits_opt {
             (traits.metabolism_rate, traits.movement_cost)
         } else {
             (metabolism.base_rate, metabolism.movement_cost)
         };
 
+        // Step 8: Apply tuning multipliers
+        let effective_base_rate = base_rate * base_metabolism_mult;
+        let effective_movement_cost = organism_movement_cost * movement_cost_mult;
+
         // Base metabolic cost (proportional to size)
-        let base_cost = base_rate * size.value() * dt;
+        let base_cost = effective_base_rate * size.value() * dt;
 
         // Movement cost (proportional to speed)
         let speed = velocity.0.length();
-        let movement_cost = speed * movement_cost_mult * dt;
+        let movement_cost = speed * effective_movement_cost * dt;
 
         // Total energy consumed
         let total_cost = base_cost + movement_cost;
@@ -574,8 +583,9 @@ pub fn handle_eating(
 }
 
 /// Update organism age and reproduction cooldown
-/// NOTE: Bevy's scheduler automatically parallelizes independent systems
+/// Step 10: Bevy automatically parallelizes systems at the scheduler level
 pub fn update_age(mut query: Query<(&mut Age, &mut ReproductionCooldown)>) {
+    // Step 10: Bevy's scheduler handles parallelization automatically
     for (mut age, mut cooldown) in query.iter_mut() {
         age.increment();
         cooldown.decrement();

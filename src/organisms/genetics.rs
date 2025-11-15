@@ -264,7 +264,7 @@ pub mod traits {
         )
     }
 
-    /// Express reproduction cooldown trait (350 to 2400 ticks).
+    /// Express reproduction cooldown trait (600 to 3600 ticks - tuned for stability).
     pub fn express_reproduction_cooldown(genome: &Genome) -> f32 {
         express_with_weights(
             genome,
@@ -275,8 +275,8 @@ pub mod traits {
                 (DEVELOPMENTAL_PLASTICITY, 0.5),
             ],
             0.0,
-            350.0,
-            2400.0,
+            600.0, // Minimum 600 ticks (~10 seconds at 60 FPS)
+            3600.0, // Maximum 3600 ticks (~60 seconds at 60 FPS)
         )
     }
 

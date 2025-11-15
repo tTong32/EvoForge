@@ -4,6 +4,7 @@ mod climate;
 mod grid;
 mod resources;
 mod terrain;
+mod events;
 
 use bevy::prelude::*;
 use bevy::time::Time;
@@ -17,6 +18,10 @@ pub use climate::ClimateState;
 pub use grid::WorldGrid;
 pub use resources::*;
 pub use terrain::*;
+pub use events::*;
+
+// Re-export specific types for visualization
+pub use events::{DisasterEvents, Disaster, DisasterType};
 
 /// Track which chunks/cells need updates (optimization 2)
 #[derive(Resource, Default)]
@@ -65,6 +70,7 @@ impl Plugin for WorldPlugin {
         app.init_resource::<WorldGrid>()
             .init_resource::<ClimateState>()
             .init_resource::<DirtyChunks>()
+            .init_resource::<events::DisasterEvents>() // Step 9: Major disasters
             .add_systems(Startup, initialize_world)
             .add_systems(
                 Update,
@@ -74,7 +80,12 @@ impl Plugin for WorldPlugin {
                     update_chunks,
                     regenerate_and_decay_resources,
                     flow_resources,
+                    events::update_disaster_events, // Step 9: Update disasters
                 ),
+            )
+            .add_systems(
+                Update,
+                events::apply_disaster_damage_system, // Step 9: Apply disaster damage to organisms
             );
     }
 }
@@ -137,107 +148,187 @@ fn mark_active_chunks(
 }
 
 /// Update all chunks: climate and resource regeneration/decay
+/// Step 10: PARALLELIZED - Processes chunks in parallel using rayon
 /// OPTIMIZED: Only updates dirty cells and cells near organisms
 fn update_chunks(
     mut world_grid: ResMut<WorldGrid>, 
     climate: Res<ClimateState>,
     dirty_chunks: Res<DirtyChunks>,
 ) {
+    use rayon::prelude::*;
+    
     let chunk_coords: Vec<_> = world_grid.get_chunk_coords();
-
-    for (chunk_x, chunk_y) in chunk_coords {
-        if let Some(chunk) = world_grid.get_chunk_mut(chunk_x, chunk_y) {
-            // Only update climate for active cells or if chunk is dirty
-            for y in 0..crate::world::chunk::CHUNK_SIZE {
-                for x in 0..crate::world::chunk::CHUNK_SIZE {
-                    if dirty_chunks.should_update_cell(chunk_x, chunk_y, x, y) {
-                        if let Some(cell) = chunk.get_cell_mut(x, y) {
-                            let world_pos = Vec2::new(
-                                chunk_x as f32 * crate::world::chunk::CHUNK_SIZE as f32 + x as f32,
-                                chunk_y as f32 * crate::world::chunk::CHUNK_SIZE as f32 + y as f32,
-                            );
-                            climate::update_cell_climate(cell, climate.as_ref(), world_pos);
+    let climate_ref = climate.as_ref();
+    
+    // Collect cells that need updating (read-only phase)
+    let cells_to_update: Vec<_> = chunk_coords
+        .par_iter()
+        .flat_map(|&(chunk_x, chunk_y)| {
+            world_grid
+                .get_chunk(chunk_x, chunk_y)
+                .map(|chunk| {
+                    let mut updates = Vec::new();
+                    for y in 0..crate::world::chunk::CHUNK_SIZE {
+                        for x in 0..crate::world::chunk::CHUNK_SIZE {
+                            if dirty_chunks.should_update_cell(chunk_x, chunk_y, x, y) {
+                                if let Some(cell) = chunk.get_cell(x, y) {
+                                    let world_pos = Vec2::new(
+                                        chunk_x as f32 * crate::world::chunk::CHUNK_SIZE as f32 + x as f32,
+                                        chunk_y as f32 * crate::world::chunk::CHUNK_SIZE as f32 + y as f32,
+                                    );
+                                    // Clone cell data for parallel processing
+                                    let cell_data = (chunk_x, chunk_y, x, y, world_pos, *cell);
+                                    updates.push(cell_data);
+                                }
+                            }
                         }
                     }
-                }
-            }
+                    updates
+                })
+                .unwrap_or_default()
+        })
+        .collect();
+    
+    // Process updates in parallel (compute new climate values)
+    let updated_cells: Vec<_> = cells_to_update
+        .par_iter()
+        .map(|(chunk_x, chunk_y, x, y, world_pos, cell)| {
+            let mut new_cell = *cell;
+            climate::update_cell_climate(&mut new_cell, climate_ref, *world_pos);
+            (*chunk_x, *chunk_y, *x, *y, new_cell)
+        })
+        .collect();
+    
+    // Write back results (sequential, but fast)
+    for (chunk_x, chunk_y, x, y, new_cell) in updated_cells {
+        if let Some(cell) = world_grid.get_chunk_mut(chunk_x, chunk_y)
+            .and_then(|chunk| chunk.get_cell_mut(x, y)) {
+            *cell = new_cell;
         }
     }
 }
 
 /// Regenerate and decay resources in all chunks
+/// Step 10: PARALLELIZED - Processes chunks in parallel using rayon
 /// OPTIMIZED: Sparse updates - only process cells with resources or near organisms
 /// Step 8: Uses tuning parameters for ecosystem balance
 fn regenerate_and_decay_resources(
     mut world_grid: ResMut<WorldGrid>, 
     time: Res<Time>,
     dirty_chunks: Res<DirtyChunks>,
-    tuning: Option<Res<crate::organisms::EcosystemTuning>>, // Step 8: Optional tuning
+    tuning: Option<Res<crate::organisms::EcosystemTuning>>, // Step 8: Tuning parameters
 ) {
+    use rayon::prelude::*;
+    
     let dt = time.delta_seconds();
     let chunk_coords: Vec<_> = world_grid.get_chunk_coords();
+    let tuning_ref = tuning.as_deref();
 
-    for (chunk_x, chunk_y) in chunk_coords {
-        if let Some(chunk) = world_grid.get_chunk_mut(chunk_x, chunk_y) {
-            for y in 0..crate::world::chunk::CHUNK_SIZE {
-                for x in 0..crate::world::chunk::CHUNK_SIZE {
-                    if dirty_chunks.should_update_cell(chunk_x, chunk_y, x, y) {
-                        if let Some(cell) = chunk.get_cell_mut(x, y) {
-                            // Check if cell has any meaningful resources first
-                            let has_resources = (0..crate::world::cell::RESOURCE_TYPE_COUNT)
-                                .any(|i| cell.resource_density[i] > 0.001);
-                            
-                            // Only update if cell has resources OR is active (near organisms)
-                            if has_resources || dirty_chunks.active_cells.contains(&((chunk_x, chunk_y), (x, y))) {
-                                resources::regenerate_resources(cell, dt);
-                                resources::decay_resources(cell, dt);
-                                resources::quantize_resources(cell, 0.001);
+    // Collect cells that need updating (read-only phase)
+    let cells_to_update: Vec<_> = chunk_coords
+        .par_iter()
+        .flat_map(|&(chunk_x, chunk_y)| {
+            world_grid
+                .get_chunk(chunk_x, chunk_y)
+                .map(|chunk| {
+                    let mut updates = Vec::new();
+                    for y in 0..crate::world::chunk::CHUNK_SIZE {
+                        for x in 0..crate::world::chunk::CHUNK_SIZE {
+                            if dirty_chunks.should_update_cell(chunk_x, chunk_y, x, y) {
+                                if let Some(cell) = chunk.get_cell(x, y) {
+                                    // Check if cell has any meaningful resources first
+                                    let has_resources = (0..crate::world::cell::RESOURCE_TYPE_COUNT)
+                                        .any(|i| cell.resource_density[i] > 0.001);
+                                    
+                                    // Only update if cell has resources OR is active (near organisms)
+                                    if has_resources || dirty_chunks.active_cells.contains(&((chunk_x, chunk_y), (x, y))) {
+                                        updates.push((chunk_x, chunk_y, x, y, *cell));
+                                    }
+                                }
                             }
                         }
                     }
-                }
-            }
+                    updates
+                })
+                .unwrap_or_default()
+        })
+        .collect();
+    
+    // Process updates in parallel
+    let updated_cells: Vec<_> = cells_to_update
+        .par_iter()
+        .map(|(chunk_x, chunk_y, x, y, cell)| {
+            let mut new_cell = *cell;
+            resources::regenerate_resources(&mut new_cell, dt, tuning_ref);
+            resources::decay_resources(&mut new_cell, dt, tuning_ref);
+            resources::quantize_resources(&mut new_cell, 0.001);
+            (*chunk_x, *chunk_y, *x, *y, new_cell)
+        })
+        .collect();
+    
+    // Write back results (sequential, but fast)
+    for (chunk_x, chunk_y, x, y, new_cell) in updated_cells {
+        if let Some(cell) = world_grid.get_chunk_mut(chunk_x, chunk_y)
+            .and_then(|chunk| chunk.get_cell_mut(x, y)) {
+            *cell = new_cell;
         }
     }
 }
 
 /// Flow resources between neighboring cells (simplified diffusion)
+/// Step 10: PARALLELIZED - Processes chunks in parallel using rayon
 /// OPTIMIZED: Uses direct array indexing instead of find() for O(1) access
-/// Flow resources between neighboring cells (simplified diffusion)
 /// OPTIMIZED: Uses flat Vec to avoid any stack allocations
 fn flow_resources(mut world_grid: ResMut<WorldGrid>, time: Res<Time>) {
+    use rayon::prelude::*;
+    
     let dt = time.delta_seconds();
     let diffusion_rate = 0.1; // How quickly resources flow
     let chunk_coords: Vec<_> = world_grid.get_chunk_coords();
 
+    // Step 10: Process chunks in parallel
     // For now, we'll do a simple pass within chunks
     // Full diffusion across chunk boundaries requires more complex handling
     // This is a simplified version for Step 2
 
-    for (chunk_x, chunk_y) in chunk_coords {
-        if let Some(chunk) = world_grid.get_chunk_mut(chunk_x, chunk_y) {
-            use crate::world::chunk::CHUNK_SIZE;
-            const RESOURCE_COUNT: usize = crate::world::cell::RESOURCE_TYPE_COUNT;
-            
-            // Use flat Vec to avoid any stack allocation issues
-            // Layout: [cell0_r0, cell0_r1, ..., cell0_r5, cell1_r0, ...]
-            let total_size = CHUNK_SIZE * CHUNK_SIZE * RESOURCE_COUNT;
-            let mut temp_resources = Vec::with_capacity(total_size);
-            temp_resources.resize(total_size, 0.0f32);
-
-            // First pass: copy current resource densities into flat buffer
-            for y in 0..CHUNK_SIZE {
-                for x in 0..CHUNK_SIZE {
-                    if let Some(cell) = chunk.get_cell(x, y) {
-                        let base_idx = (y * CHUNK_SIZE + x) * RESOURCE_COUNT;
-                        for i in 0..RESOURCE_COUNT {
-                            temp_resources[base_idx + i] = cell.resource_density[i];
+    // Collect chunk data for parallel processing
+    let chunk_data: Vec<_> = chunk_coords
+        .par_iter()
+        .filter_map(|&(chunk_x, chunk_y)| {
+            world_grid.get_chunk(chunk_x, chunk_y).map(|chunk| {
+                use crate::world::chunk::CHUNK_SIZE;
+                const RESOURCE_COUNT: usize = crate::world::cell::RESOURCE_TYPE_COUNT;
+                
+                // Copy chunk data for parallel processing
+                let mut temp_resources = Vec::with_capacity(CHUNK_SIZE * CHUNK_SIZE * RESOURCE_COUNT);
+                temp_resources.resize(CHUNK_SIZE * CHUNK_SIZE * RESOURCE_COUNT, 0.0f32);
+                
+                for y in 0..CHUNK_SIZE {
+                    for x in 0..CHUNK_SIZE {
+                        if let Some(cell) = chunk.get_cell(x, y) {
+                            let base_idx = (y * CHUNK_SIZE + x) * RESOURCE_COUNT;
+                            for i in 0..RESOURCE_COUNT {
+                                temp_resources[base_idx + i] = cell.resource_density[i];
+                            }
                         }
                     }
                 }
-            }
-
-            // Second pass: apply diffusion using the buffered data
+                
+                (chunk_x, chunk_y, temp_resources)
+            })
+        })
+        .collect();
+    
+    // Process diffusion in parallel
+    let updated_chunks: Vec<_> = chunk_data
+        .par_iter()
+        .map(|(chunk_x, chunk_y, temp_resources)| {
+            use crate::world::chunk::CHUNK_SIZE;
+            const RESOURCE_COUNT: usize = crate::world::cell::RESOURCE_TYPE_COUNT;
+            
+            let mut new_resources = temp_resources.clone();
+            
+            // Apply diffusion
             for y in 0..CHUNK_SIZE {
                 for x in 0..CHUNK_SIZE {
                     let index = y * CHUNK_SIZE + x;
@@ -269,14 +360,33 @@ fn flow_resources(mut world_grid: ResMut<WorldGrid>, time: Res<Time>) {
                     }
 
                     if neighbor_count > 0 {
-                        if let Some(cell) = chunk.get_cell_mut(x, y) {
-                            for i in 0..RESOURCE_COUNT {
-                                let old_value = temp_resources[base_idx + i];
-                                let neighbor_avg = neighbor_sum[i] / neighbor_count as f32;
-                                let diff = neighbor_avg - old_value;
-                                cell.resource_density[i] =
-                                    (old_value + diff * diffusion_rate * dt).clamp(0.0, 1.0);
-                            }
+                        for i in 0..RESOURCE_COUNT {
+                            let old_value = temp_resources[base_idx + i];
+                            let neighbor_avg = neighbor_sum[i] / neighbor_count as f32;
+                            let diff = neighbor_avg - old_value;
+                            new_resources[base_idx + i] =
+                                (old_value + diff * diffusion_rate * dt).clamp(0.0, 1.0);
+                        }
+                    }
+                }
+            }
+            
+            (*chunk_x, *chunk_y, new_resources)
+        })
+        .collect();
+    
+    // Write back results
+    for (chunk_x, chunk_y, new_resources) in updated_chunks {
+        if let Some(chunk) = world_grid.get_chunk_mut(chunk_x, chunk_y) {
+            use crate::world::chunk::CHUNK_SIZE;
+            const RESOURCE_COUNT: usize = crate::world::cell::RESOURCE_TYPE_COUNT;
+            
+            for y in 0..CHUNK_SIZE {
+                for x in 0..CHUNK_SIZE {
+                    if let Some(cell) = chunk.get_cell_mut(x, y) {
+                        let base_idx = (y * CHUNK_SIZE + x) * RESOURCE_COUNT;
+                        for i in 0..RESOURCE_COUNT {
+                            cell.resource_density[i] = new_resources[base_idx + i];
                         }
                     }
                 }

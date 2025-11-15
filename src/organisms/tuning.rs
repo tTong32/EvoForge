@@ -43,35 +43,38 @@ pub struct EcosystemTuning {
 impl Default for EcosystemTuning {
     fn default() -> Self {
         Self {
-            // Balanced regeneration rates (tuned for Step 8)
-            plant_regeneration_rate: 0.08,
-            water_regeneration_rate: 0.12,
-            sunlight_regeneration_rate: 0.15,
-            mineral_regeneration_rate: 0.05,
-            detritus_regeneration_rate: 0.03,
-            prey_regeneration_rate: 0.02,
+            // Balanced regeneration rates (tuned for Step 8 - balanced with consumption)
+            // These rates ensure resources regenerate faster than they're consumed
+            plant_regeneration_rate: 0.10,      // Increased from 0.08 for better balance
+            water_regeneration_rate: 0.15,      // Increased from 0.12
+            sunlight_regeneration_rate: 0.20,   // Increased from 0.15 (sunlight should be abundant)
+            mineral_regeneration_rate: 0.06,    // Increased from 0.05
+            detritus_regeneration_rate: 0.04,   // Increased from 0.03 (more detritus = more decomposers)
+            prey_regeneration_rate: 0.03,       // Increased from 0.02 (prey should regenerate from death)
 
             // Decay rates (resources naturally decay over time)
-            plant_decay_rate: 0.01,
-            water_decay_rate: 0.005,
-            sunlight_decay_rate: 0.02, // Sunlight cycles quickly
-            mineral_decay_rate: 0.001,   // Minerals decay very slowly
-            detritus_decay_rate: 0.015,  // Detritus breaks down
-            prey_decay_rate: 0.02,       // Prey resources decay quickly
+            // Balanced to prevent resource accumulation while allowing regeneration
+            plant_decay_rate: 0.008,           // Slightly reduced from 0.01
+            water_decay_rate: 0.004,           // Slightly reduced from 0.005
+            sunlight_decay_rate: 0.025,        // Increased from 0.02 (sunlight cycles quickly)
+            mineral_decay_rate: 0.0005,        // Reduced from 0.001 (minerals persist longer)
+            detritus_decay_rate: 0.012,         // Reduced from 0.015 (detritus persists for decomposers)
+            prey_decay_rate: 0.025,           // Increased from 0.02 (prey moves/dies quickly)
 
-            // Consumption
-            consumption_rate_base: 5.0,
-            energy_conversion_efficiency: 0.3,
-            decomposer_efficiency_multiplier: 0.5,
+            // Consumption (balanced with regeneration rates)
+            // Lower consumption ensures resources can regenerate
+            consumption_rate_base: 4.0,         // Reduced from 5.0 to balance with regeneration
+            energy_conversion_efficiency: 0.35, // Increased from 0.3 (organisms get more energy)
+            decomposer_efficiency_multiplier: 0.6, // Increased from 0.5 (decomposers are more efficient)
 
-            // Metabolism
-            base_metabolism_multiplier: 1.0,
-            movement_cost_multiplier: 1.0,
+            // Metabolism (balanced to prevent energy drain)
+            base_metabolism_multiplier: 0.9,    // Reduced from 1.0 (organisms use less energy)
+            movement_cost_multiplier: 0.85,      // Reduced from 1.0 (movement costs less)
 
-            // Reproduction
-            reproduction_chance_multiplier: 0.1, // 10% chance per frame when conditions met
-            min_reproduction_cooldown: 350.0,
-            max_reproduction_cooldown: 2400.0,
+            // Reproduction (tuned for stability - prevents instant spawning)
+            reproduction_chance_multiplier: 0.03, // 3% chance per frame when conditions met (reduced from 10%)
+            min_reproduction_cooldown: 600.0,    // Minimum 600 ticks (~10 seconds at 60 FPS)
+            max_reproduction_cooldown: 3600.0,  // Maximum 3600 ticks (~60 seconds at 60 FPS)
 
             // Spawn
             initial_spawn_count: 100,
@@ -91,31 +94,34 @@ impl EcosystemTuning {
     /// Create preset for fast evolution (higher mutation, faster reproduction)
     pub fn fast_evolution() -> Self {
         let mut tuning = Self::default();
-        tuning.reproduction_chance_multiplier = 0.15; // 15% chance
-        tuning.min_reproduction_cooldown = 200.0;
-        tuning.max_reproduction_cooldown = 1200.0;
-        tuning.plant_regeneration_rate = 0.12; // More resources
+        tuning.reproduction_chance_multiplier = 0.08; // 8% chance (reduced from 15% for balance)
+        tuning.min_reproduction_cooldown = 300.0;     // Faster reproduction
+        tuning.max_reproduction_cooldown = 1800.0;
+        tuning.plant_regeneration_rate = 0.15;        // More resources
+        tuning.water_regeneration_rate = 0.20;
         tuning
     }
 
     /// Create preset for slow, stable ecosystem (lower reproduction, higher resources)
     pub fn stable() -> Self {
         let mut tuning = Self::default();
-        tuning.reproduction_chance_multiplier = 0.05; // 5% chance
-        tuning.min_reproduction_cooldown = 500.0;
-        tuning.max_reproduction_cooldown = 3000.0;
-        tuning.plant_regeneration_rate = 0.15; // More resources for stability
-        tuning.water_regeneration_rate = 0.18;
+        tuning.reproduction_chance_multiplier = 0.02; // 2% chance (reduced from 5%)
+        tuning.min_reproduction_cooldown = 800.0;     // Slower reproduction
+        tuning.max_reproduction_cooldown = 4800.0;
+        tuning.plant_regeneration_rate = 0.18;       // More resources for stability
+        tuning.water_regeneration_rate = 0.22;
+        tuning.consumption_rate_base = 3.5;           // Lower consumption
         tuning
     }
 
     /// Create preset for competitive ecosystem (scarce resources, faster decay)
     pub fn competitive() -> Self {
         let mut tuning = Self::default();
-        tuning.plant_regeneration_rate = 0.05; // Scarce resources
-        tuning.water_regeneration_rate = 0.08;
-        tuning.plant_decay_rate = 0.02; // Faster decay
-        tuning.consumption_rate_base = 7.0; // Faster consumption
+        tuning.plant_regeneration_rate = 0.06;        // Scarce resources
+        tuning.water_regeneration_rate = 0.10;
+        tuning.plant_decay_rate = 0.015;              // Faster decay
+        tuning.consumption_rate_base = 5.5;           // Higher consumption
+        tuning.base_metabolism_multiplier = 1.1;     // Higher metabolism
         tuning
     }
 }

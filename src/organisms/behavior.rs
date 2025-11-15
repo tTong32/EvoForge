@@ -361,11 +361,137 @@ pub fn decide_behavior_with_memory(
     recent_threat: Option<Vec2>,
     has_migration_target: bool,
 ) -> BehaviorDecision {
+    // Step 8: Improved behavior differentiation between organism types
     // Priority system: Survival > Reproduction > Exploration
+    
     let aggression = cached_traits.aggression;
     let boldness = cached_traits.boldness;
     let risk_tolerance = cached_traits.risk_tolerance;
 
+    // PRODUCERS: Stationary, focus on growth, minimal movement
+    if organism_type == OrganismType::Producer {
+        // Producers don't flee (they're stationary)
+        // They focus on eating (photosynthesis) and staying in place
+        
+        let hunger_pressure = ((1.0 - energy.ratio()).max(0.0) * 0.8) + (hunger_memory * 0.2);
+        let hunger_barrier = 0.4; // Producers are less sensitive to hunger
+        
+        if hunger_pressure > hunger_barrier {
+            if is_at_food_source(organism_type, sensory) {
+                return BehaviorDecision {
+                    state: BehaviorState::Eating,
+                    target_entity: None,
+                    target_position: None,
+                    migration_target: None,
+                };
+            }
+            // Producers can slowly move toward better resource areas
+            if let Some(best_food) = find_best_food_source_weighted(
+                organism_type,
+                sensory,
+                cached_traits.resource_selectivity,
+            ) {
+                if matches!(current_state, BehaviorState::Eating) && state_time < 5.0 {
+                    return BehaviorDecision {
+                        state: BehaviorState::Eating,
+                        target_entity: None,
+                        target_position: Some(best_food),
+                        migration_target: None,
+                    };
+                }
+                // Only move if resources are very low
+                if energy.ratio() < 0.3 {
+                    return BehaviorDecision {
+                        state: BehaviorState::Chasing,
+                        target_entity: None,
+                        target_position: Some(best_food),
+                        migration_target: None,
+                    };
+                }
+            }
+        }
+        
+        // Producers rest when low energy (conserving resources)
+        if energy.ratio() < 0.2 {
+            return BehaviorDecision {
+                state: BehaviorState::Resting,
+                target_entity: None,
+                target_position: None,
+                migration_target: None,
+            };
+        }
+        
+        // Producers mostly stay in place (wandering is minimal)
+        return BehaviorDecision {
+            state: BehaviorState::Wandering,
+            target_entity: None,
+            target_position: None,
+            migration_target: None,
+        };
+    }
+    
+    // DECOMPOSERS: Slow movement, stay near detritus, less aggressive
+    if organism_type == OrganismType::Decomposer {
+        // Decomposers don't flee (they're small and not typically prey)
+        // They focus on finding detritus and staying near it
+        
+        let hunger_pressure = ((1.0 - energy.ratio()).max(0.0) * 0.6) + (hunger_memory * 0.4);
+        let hunger_barrier = 0.35; // Decomposers are moderately sensitive
+        
+        if hunger_pressure > hunger_barrier {
+            if is_at_food_source(organism_type, sensory) {
+                return BehaviorDecision {
+                    state: BehaviorState::Eating,
+                    target_entity: None,
+                    target_position: None,
+                    migration_target: None,
+                };
+            }
+            
+            // Decomposers slowly move toward detritus
+            if let Some(best_food) = find_best_food_source_weighted(
+                organism_type,
+                sensory,
+                cached_traits.resource_selectivity,
+            ) {
+                if matches!(current_state, BehaviorState::Eating) && state_time < 3.0 {
+                    return BehaviorDecision {
+                        state: BehaviorState::Eating,
+                        target_entity: None,
+                        target_position: Some(best_food),
+                        migration_target: None,
+                    };
+                }
+                return BehaviorDecision {
+                    state: BehaviorState::Chasing,
+                    target_entity: None,
+                    target_position: Some(best_food),
+                    migration_target: None,
+                };
+            }
+        }
+        
+        // Decomposers rest when low energy
+        if energy.ratio() < 0.2 {
+            return BehaviorDecision {
+                state: BehaviorState::Resting,
+                target_entity: None,
+                target_position: None,
+                migration_target: None,
+            };
+        }
+        
+        // Decomposers wander slowly looking for detritus
+        return BehaviorDecision {
+            state: BehaviorState::Wandering,
+            target_entity: None,
+            target_position: None,
+            migration_target: None,
+        };
+    }
+    
+    // CONSUMERS: Active hunting, more movement, aggressive behaviors
+    // (Original behavior logic for consumers)
     if let Some((entity, pred_pos, distance)) = sensory.nearest_predator {
         let flee_threshold = 8.0 + (boldness * 14.0) + (risk_tolerance * 6.0);
         let memory_bonus = if threat_timer > 0.0 { 5.0 } else { 0.0 };
@@ -393,6 +519,33 @@ pub fn decide_behavior_with_memory(
     let hunger_barrier = (0.3 - cached_traits.foraging_drive * 0.15).clamp(0.1, 0.5);
 
     if hunger_pressure > hunger_barrier {
+        // Consumers actively hunt prey
+        if energy.ratio() > 0.4 && aggression > 0.4 {
+            if let Some((entity, prey_pos, distance, _, _is_prey, _)) = sensory
+                .nearby_organisms
+                .iter()
+                .filter(|(_, _, _, _, is_prey, _)| *is_prey)
+                .min_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
+            {
+                if *distance < 5.0 {
+                    return BehaviorDecision {
+                        state: BehaviorState::Eating,
+                        target_entity: Some(*entity),
+                        target_position: Some(*prey_pos),
+                        migration_target: None,
+                    };
+                } else if *distance < 30.0 {
+                    return BehaviorDecision {
+                        state: BehaviorState::Chasing,
+                        target_entity: Some(*entity),
+                        target_position: Some(*prey_pos),
+                        migration_target: None,
+                    };
+                }
+            }
+        }
+        
+        // Also eat plant resources
         if let Some(best_food) = find_best_food_source_weighted(
             organism_type,
             sensory,
@@ -421,31 +574,6 @@ pub fn decide_behavior_with_memory(
                 target_position: None,
                 migration_target: None,
             };
-        }
-    }
-
-    if organism_type == OrganismType::Consumer && energy.ratio() > 0.4 && aggression > 0.5 {
-        if let Some((entity, prey_pos, distance, _, _is_prey, _)) = sensory
-            .nearby_organisms
-            .iter()
-            .filter(|(_, _, _, _, is_prey, _)| *is_prey)
-            .min_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
-        {
-            if *distance < 5.0 {
-                return BehaviorDecision {
-                    state: BehaviorState::Eating,
-                    target_entity: Some(*entity),
-                    target_position: Some(*prey_pos),
-                    migration_target: None,
-                };
-            } else if *distance < 30.0 {
-                return BehaviorDecision {
-                    state: BehaviorState::Chasing,
-                    target_entity: Some(*entity),
-                    target_position: Some(*prey_pos),
-                    migration_target: None,
-                };
-            }
         }
     }
 
@@ -603,7 +731,7 @@ pub fn calculate_behavior_velocity(
             if let Some(flee_from) = source {
                 // Move away from threat
                 let direction = (position - flee_from).normalize_or_zero();
-                direction * current_speed * 1.5 // Flee faster
+                direction * current_speed // Flee at max speed
             } else {
                 // Random direction if no target
                 let angle = (time * 2.0).sin() * std::f32::consts::PI;
@@ -647,10 +775,16 @@ pub fn calculate_behavior_velocity(
             }
         }
         BehaviorState::Wandering => {
+            // Step 8: Different wandering speeds based on organism type
+            let wander_speed_mult = match _organism_type {
+                OrganismType::Producer => 0.1, // Producers barely move
+                OrganismType::Decomposer => 0.4, // Decomposers move slowly
+                OrganismType::Consumer => 0.7, // Consumers move more actively
+            };
             // Random walk with occasional direction changes
             let angle =
                 (time * 0.5 + (position.x + position.y) * 0.1).sin() * std::f32::consts::TAU;
-            Vec2::from_angle(angle) * current_speed * 0.7
+            Vec2::from_angle(angle) * current_speed * wander_speed_mult
         }
     }
 }

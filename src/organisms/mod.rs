@@ -5,6 +5,8 @@ mod speciation;
 mod systems;
 mod tuning;
 mod ecosystem_stats;
+mod disease;
+mod coevolution;
 
 pub use behavior::*;
 use bevy::prelude::*;
@@ -13,6 +15,11 @@ pub use genetics::*;
 pub use speciation::*;
 pub use tuning::*;
 pub use ecosystem_stats::*;
+pub use disease::*;
+pub use coevolution::*;
+
+// Re-export specific types for visualization
+pub use disease::Infected;
 
 pub struct OrganismPlugin;
 
@@ -26,6 +33,8 @@ impl Plugin for OrganismPlugin {
             .init_resource::<speciation::SpeciesTracker>() // Step 8: Speciation system
             .init_resource::<tuning::EcosystemTuning>() // Step 8: Tuning parameters
             .init_resource::<ecosystem_stats::EcosystemStats>() // Step 8: Ecosystem statistics
+            .init_resource::<disease::DiseaseSystem>() // Step 9: Disease system
+            .init_resource::<coevolution::CoEvolutionSystem>() // Step 9: Co-evolution system
             .add_systems(Startup, systems::spawn_initial_organisms)
             .add_systems(
                 Update,
@@ -39,6 +48,9 @@ impl Plugin for OrganismPlugin {
                     systems::handle_reproduction,
                     systems::handle_death,
                     update_speciation, // Step 8: Update species assignments
+                    disease::update_disease_system, // Step 9: Update diseases (spawn and spread)
+                    disease::update_infected_organisms_system, // Step 9: Update infected organisms (damage)
+                    coevolution::update_coevolution_system, // Step 9: Update co-evolution
                 )
                     .chain(),
             )
