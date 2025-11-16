@@ -5,6 +5,8 @@ mod grid;
 mod resources;
 mod terrain;
 mod events;
+mod plants;
+mod plant_systems;
 
 use bevy::prelude::*;
 use bevy::time::Time;
@@ -19,6 +21,7 @@ pub use grid::WorldGrid;
 pub use resources::*;
 pub use terrain::*;
 pub use events::*;
+pub use plants::*;
 
 // Re-export specific types for visualization
 pub use events::{DisasterEvents, Disaster, DisasterType};
@@ -80,6 +83,8 @@ impl Plugin for WorldPlugin {
                     update_chunks,
                     regenerate_and_decay_resources,
                     flow_resources,
+                    plant_systems::update_plants_system,
+                    plant_systems::plant_spread_system,
                     events::update_disaster_events, // Step 9: Update disasters
                 ),
             )
@@ -101,6 +106,9 @@ fn initialize_world(mut world_grid: ResMut<WorldGrid>) {
             terrain::initialize_chunk(chunk);
         }
     }
+
+    // Seed founder plant species in the initialized chunks.
+    plant_systems::initialize_founder_plants(&mut world_grid);
 
     info!(
         "World grid initialized with {} chunks",
@@ -177,7 +185,7 @@ fn update_chunks(
                                         chunk_y as f32 * crate::world::chunk::CHUNK_SIZE as f32 + y as f32,
                                     );
                                     // Clone cell data for parallel processing
-                                    let cell_data = (chunk_x, chunk_y, x, y, world_pos, *cell);
+                                    let cell_data = (chunk_x, chunk_y, x, y, world_pos, cell.clone());
                                     updates.push(cell_data);
                                 }
                             }
@@ -193,7 +201,7 @@ fn update_chunks(
     let updated_cells: Vec<_> = cells_to_update
         .par_iter()
         .map(|(chunk_x, chunk_y, x, y, world_pos, cell)| {
-            let mut new_cell = *cell;
+            let mut new_cell = cell.clone();
             climate::update_cell_climate(&mut new_cell, climate_ref, *world_pos);
             (*chunk_x, *chunk_y, *x, *y, new_cell)
         })
@@ -242,7 +250,7 @@ fn regenerate_and_decay_resources(
                                     
                                     // Only update if cell has resources OR is active (near organisms)
                                     if has_resources || dirty_chunks.active_cells.contains(&((chunk_x, chunk_y), (x, y))) {
-                                        updates.push((chunk_x, chunk_y, x, y, *cell));
+                                        updates.push((chunk_x, chunk_y, x, y, cell.clone()));
                                     }
                                 }
                             }
@@ -258,7 +266,7 @@ fn regenerate_and_decay_resources(
     let updated_cells: Vec<_> = cells_to_update
         .par_iter()
         .map(|(chunk_x, chunk_y, x, y, cell)| {
-            let mut new_cell = *cell;
+            let mut new_cell = cell.clone();
             resources::regenerate_resources(&mut new_cell, dt, tuning_ref);
             resources::decay_resources(&mut new_cell, dt, tuning_ref);
             resources::quantize_resources(&mut new_cell, 0.001);

@@ -121,6 +121,7 @@ impl Genome {
 /// Each trait is encoded by one or more genes
 pub mod traits {
     use super::*;
+    use crate::organisms::components::{IncubationType, SpawnType};
 
     /// Helper: convert a [0,1] gene value into [-1,1]
     fn gene_to_signed(value: f32) -> f32 {
@@ -182,6 +183,14 @@ pub mod traits {
     pub const THREAT_DECAY: usize = 26;
     pub const RESOURCE_SELECTIVITY: usize = 27;
     pub const MIGRATION_DRIVE: usize = 28;
+    // Phase 2+: additional predation/learning/offspring/defense genes (reuse indices where possible)
+    pub const CONSUMPTION_RATE: usize = 29;
+    pub const ATTACK_STRENGTH: usize = 30;
+    pub const ARMOR_GENE: usize = 31;
+    pub const POISON_GENE: usize = 32;
+    pub const FLEE_SPEED_GENE: usize = 33;
+    pub const ENDURANCE_GENE: usize = 34;
+    pub const HUNTING_STRATEGY_GENE: usize = 35;
 
     /// Express speed trait (0.5 to 20.0 units/sec) using multiple genes.
     pub fn express_speed(genome: &Genome) -> f32 {
@@ -463,6 +472,327 @@ pub mod traits {
             ],
             0.0,
             0.0,
+            1.0,
+        )
+    }
+
+    /// Express consumption rate trait (fraction of plant/prey that can be eaten per second).
+    pub fn express_consumption_rate(genome: &Genome) -> f32 {
+        express_with_weights(
+            genome,
+            &[
+                (CONSUMPTION_RATE, 1.0),
+                (SIZE, 0.4),
+                (METABOLISM_RATE, 0.3),
+            ],
+            0.0,
+            0.02,
+            0.4,
+        )
+    }
+
+    /// Express attack strength trait (damage per second applied to prey energy).
+    pub fn express_attack_strength(genome: &Genome) -> f32 {
+        express_with_weights(
+            genome,
+            &[
+                (ATTACK_STRENGTH, 1.0),
+                (SIZE, 0.6),
+                (AGGRESSION, 0.5),
+            ],
+            0.0,
+            1.0,
+            12.0,
+        )
+    }
+
+    /// Defensive armor (0–1, reduces physical damage).
+    pub fn express_armor(genome: &Genome) -> f32 {
+        express_with_weights(
+            genome,
+            &[
+                (ARMOR_GENE, 1.0),
+                (STRUCTURAL_DENSITY, 0.8),
+            ],
+            0.0,
+            0.0,
+            1.0,
+        )
+    }
+
+    /// Poison strength (0–1, discourages predators; can reduce their success).
+    pub fn express_poison_strength(genome: &Genome) -> f32 {
+        express_with_weights(
+            genome,
+            &[
+                (POISON_GENE, 1.0),
+                (THERMAL_TOLERANCE, 0.3),
+            ],
+            0.0,
+            0.0,
+            1.0,
+        )
+    }
+
+    /// Flee speed bonus (0.5–2.0 multiplier to base speed when fleeing).
+    pub fn express_flee_speed(genome: &Genome) -> f32 {
+        express_with_weights(
+            genome,
+            &[
+                (SPEED, 0.8),
+                (FLEE_SPEED_GENE, 1.0),
+                (SPEED_ENDURANCE, 0.5),
+            ],
+            0.0,
+            0.5,
+            2.0,
+        )
+    }
+
+    /// Endurance (0–1, makes prey harder to finish off).
+    pub fn express_endurance(genome: &Genome) -> f32 {
+        express_with_weights(
+            genome,
+            &[
+                (ENDURANCE_GENE, 1.0),
+                (SPEED_ENDURANCE, 0.7),
+                (MAX_ENERGY, 0.3),
+            ],
+            0.0,
+            0.0,
+            1.0,
+        )
+    }
+
+    /// Express coordination trait (0.0 to 1.0) used for pack hunting.
+    pub fn express_coordination(genome: &Genome) -> f32 {
+        express_with_weights(
+            genome,
+            &[
+                (SOCIAL_SENSITIVITY, 1.0),
+                (SENSORY_FOCUS, 0.5),
+                (MIGRATION_DRIVE, 0.3),
+            ],
+            0.0,
+            0.0,
+            1.0,
+        )
+    }
+
+    /// Whether this species tends to form packs.
+    pub fn express_forms_packs(genome: &Genome) -> bool {
+        let v = express_with_weights(
+            genome,
+            &[
+                (SOCIAL_SENSITIVITY, 1.0),
+                (EXPLORATION_DRIVE, -0.5),
+                (RISK_TOLERANCE, 0.3),
+            ],
+            0.0,
+            0.0,
+            1.0,
+        );
+        v > 0.5
+    }
+
+    /// Preferred pack lifetime in seconds.
+    pub fn express_pack_lifetime(genome: &Genome) -> f32 {
+        express_with_weights(
+            genome,
+            &[
+                (SOCIAL_SENSITIVITY, 0.8),
+                (MIGRATION_DRIVE, 0.4),
+            ],
+            0.0,
+            50.0,
+            600.0,
+        )
+    }
+
+    /// Preferred pack size (1–8).
+    pub fn express_pack_size_preference(genome: &Genome) -> f32 {
+        express_with_weights(
+            genome,
+            &[
+                (SOCIAL_SENSITIVITY, 1.0),
+                (REPRODUCTIVE_INVESTMENT, -0.3),
+            ],
+            0.0,
+            1.0,
+            8.0,
+        )
+    }
+
+    /// Learning rate for prey knowledge (0.05–0.4).
+    pub fn express_learning_rate(genome: &Genome) -> f32 {
+        express_with_weights(
+            genome,
+            &[
+                (MUTATION_CONTROL, 0.8),
+                (DEVELOPMENTAL_PLASTICITY, 0.7),
+            ],
+            -0.1,
+            0.05,
+            0.4,
+        )
+    }
+
+    /// Teaching ability (0.1–1.0) for knowledge transfer to offspring.
+    pub fn express_teaching_ability(genome: &Genome) -> f32 {
+        express_with_weights(
+            genome,
+            &[
+                (SOCIAL_SENSITIVITY, 1.0),
+                (SENSORY_FOCUS, 0.4),
+            ],
+            0.0,
+            0.1,
+            1.0,
+        )
+    }
+
+    /// Hunting strategy: 0–0.33 -> Ambush, 0.33–0.66 -> Pursuit, >0.66 -> Pack.
+    pub fn express_hunting_strategy(genome: &Genome) -> crate::organisms::components::HuntingStrategy {
+        let v = express_with_weights(
+            genome,
+            &[
+                (HUNTING_STRATEGY_GENE, 1.0),
+                (EXPLORATION_DRIVE, -0.3),
+                (SENSORY_FOCUS, 0.3),
+            ],
+            0.0,
+            0.0,
+            1.0,
+        );
+        if v < 0.33 {
+            crate::organisms::components::HuntingStrategy::Ambush
+        } else if v < 0.66 {
+            crate::organisms::components::HuntingStrategy::Pursuit
+        } else {
+            crate::organisms::components::HuntingStrategy::Pack
+        }
+    }
+
+    // === Phase 3: Offspring & care traits expressed from genome ===
+
+    pub fn express_spawn_type(genome: &Genome) -> SpawnType {
+        let v = express_with_weights(
+            genome,
+            &[(REPRODUCTIVE_INVESTMENT, 1.0), (SIZE, 0.4)],
+            0.0,
+            0.0,
+            1.0,
+        );
+        if v > 0.5 {
+            SpawnType::Egg
+        } else {
+            SpawnType::Baby
+        }
+    }
+
+    pub fn express_incubation_type(genome: &Genome) -> IncubationType {
+        let v = express_with_weights(
+            genome,
+            &[(RISK_TOLERANCE, 1.0), (EXPLORATION_DRIVE, 0.5)],
+            0.0,
+            0.0,
+            1.0,
+        );
+        if v > 0.5 {
+            IncubationType::Guarded
+        } else {
+            IncubationType::Abandoned
+        }
+    }
+
+    pub fn express_incubation_duration(genome: &Genome) -> f32 {
+        express_with_weights(
+            genome,
+            &[(REPRODUCTIVE_INVESTMENT, 1.0), (DEVELOPMENTAL_PLASTICITY, 0.6)],
+            0.0,
+            30.0,
+            300.0,
+        )
+    }
+
+    pub fn express_parental_care_age(genome: &Genome) -> f32 {
+        express_with_weights(
+            genome,
+            &[(DEVELOPMENTAL_PLASTICITY, 1.0), (SIZE, 0.5)],
+            0.0,
+            50.0,
+            400.0,
+        )
+    }
+
+    pub fn express_meal_share_percentage(genome: &Genome) -> f32 {
+        express_with_weights(
+            genome,
+            &[(OFFSPRING_ENERGY_SHARE, 1.0), (REPRODUCTIVE_INVESTMENT, 0.6)],
+            0.0,
+            0.05,
+            0.6,
+        )
+    }
+
+    pub fn express_child_growth_rate(genome: &Genome) -> f32 {
+        express_with_weights(
+            genome,
+            &[(DEVELOPMENTAL_PLASTICITY, 1.0), (METABOLISM_RATE, 0.5)],
+            0.0,
+            0.01,
+            0.1,
+        )
+    }
+
+    pub fn express_child_max_growth_rate(genome: &Genome) -> f32 {
+        express_with_weights(
+            genome,
+            &[(DEVELOPMENTAL_PLASTICITY, 1.0), (METABOLIC_FLEXIBILITY, 0.5)],
+            0.0,
+            0.02,
+            0.2,
+        )
+    }
+
+    pub fn express_father_provides_care(genome: &Genome) -> bool {
+        let v = express_with_weights(
+            genome,
+            &[(SOCIAL_SENSITIVITY, 1.0), (RISK_TOLERANCE, -0.4)],
+            0.0,
+            0.0,
+            1.0,
+        );
+        v > 0.5
+    }
+
+    pub fn express_can_produce_milk(genome: &Genome) -> bool {
+        let v = express_with_weights(
+            genome,
+            &[(REPRODUCTIVE_INVESTMENT, 1.0), (METABOLISM_RATE, 0.4)],
+            0.0,
+            0.0,
+            1.0,
+        );
+        v > 0.5
+    }
+
+    pub fn express_milk_amount(genome: &Genome) -> f32 {
+        express_with_weights(
+            genome,
+            &[(REPRODUCTIVE_INVESTMENT, 1.0), (MAX_ENERGY, 0.4)],
+            0.0,
+            1.0,
+            8.0,
+        )
+    }
+
+    pub fn express_knowledge_transfer_rate(genome: &Genome) -> f32 {
+        express_with_weights(
+            genome,
+            &[(SOCIAL_SENSITIVITY, 1.0), (SENSORY_FOCUS, 0.4)],
+            0.0,
+            0.1,
             1.0,
         )
     }

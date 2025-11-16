@@ -1,6 +1,8 @@
+use crate::world::plants::PlantCommunity;
+
 /// Represents a single cell in the world grid
-/// Each cell contains environmental data and resource information
-#[derive(Debug, Clone, Copy)]
+/// Each cell contains environmental data, resources, and plant community information.
+#[derive(Debug, Clone)]
 pub struct Cell {
     /// Temperature in arbitrary units (0.0 = freezing, 1.0 = boiling)
     pub temperature: f32,
@@ -17,6 +19,15 @@ pub struct Cell {
     pub resource_pressure: [f32; 6],
     /// Adaptive modifier per resource type (responds to pressure & climate)
     pub resource_adaptation: [f32; 6],
+
+    /// Cell-level plant community (percentage-based).
+    pub plant_community: PlantCommunity,
+
+    /// Dead organic matter from plants (0–1 normalized mass).
+    pub dead_organic_matter: f32,
+
+    /// Nutrients from animal remains and decay.
+    pub animal_nutrients: f32,
 }
 
 impl Default for Cell {
@@ -29,6 +40,9 @@ impl Default for Cell {
             resource_density: [0.0; 6],
             resource_pressure: [0.0; 6],
             resource_adaptation: [0.0; 6],
+            plant_community: PlantCommunity::new(),
+            dead_organic_matter: 0.0,
+            animal_nutrients: 0.0,
         }
     }
 }

@@ -4,6 +4,7 @@ use crate::organisms::genetics::{traits, Genome};
 use crate::utils::SpatialHashGrid;
 use crate::world::{ResourceType, WorldGrid};
 use bevy::prelude::*;
+use bevy::ecs::system::ParamSet;
 use glam::Vec2;
 
 use std::collections::HashMap;
@@ -12,6 +13,27 @@ use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 
 const ALL_ORGANISMS_HEADER: &str = "tick,entity,position_x,position_y,velocity_x,velocity_y,speed,energy_current,energy_max,energy_ratio,age,size,organism_type,behavior_state,state_time,target_x,target_y,target_entity,sensory_range,aggression,boldness,mutation_rate,reproduction_threshold,reproduction_cooldown,foraging_drive,risk_tolerance,exploration_drive,clutch_size,offspring_energy_share,hunger_memory,threat_timer,resource_selectivity,migration_target_x,migration_target_y,migration_active";
+
+/// Event representing damage dealt during a predation attack.
+#[derive(Event, Debug, Clone, Copy)]
+pub struct PredationDamageEvent {
+    pub predator: Entity,
+    pub prey: Entity,
+    pub damage: f32,
+}
+
+/// Helper to find the nearest potential caregiver for an orphaned child.
+fn find_nearest_caregiver(
+    former_parent: Entity,
+    child_pos: &Position,
+    child_traits: &CachedTraits,
+) -> Option<(Entity, f32)> {
+    // This is a placeholder; a real implementation would query the world for
+    // nearby adults of the same species with appropriate traits.
+    // For now, we return None and rely on independence fallback.
+    let _ = (former_parent, child_pos, child_traits);
+    None
+}
 
 fn ensure_logs_directory() -> PathBuf {
     let logs_dir = PathBuf::from("data/logs");
@@ -142,11 +164,8 @@ pub fn spawn_initial_organisms(
         let movement_cost = traits::express_movement_cost(&genome);
         let reproduction_cooldown = traits::express_reproduction_cooldown(&genome) as u32;
 
-        let organism_type = match rng.usize(0..3) {
-            0 => OrganismType::Producer,
-            1 => OrganismType::Consumer,
-            _ => OrganismType::Decomposer,
-        };
+        // Phase 1+: only spawn consumer organisms; plants are cell-based now.
+        let organism_type = OrganismType::Consumer;
 
         // Random initial velocity
         let vel_x = rng.f32() * 20.0 - 10.0;
@@ -156,6 +175,8 @@ pub fn spawn_initial_organisms(
         
         // Step 8: Assign species ID using speciation system
         let species_id = species_tracker.find_or_create_species(&genome);
+
+        let learning_rate = traits::express_learning_rate(&genome);
 
         let entity = commands
             .spawn((
@@ -170,6 +191,8 @@ pub fn spawn_initial_organisms(
                 cached_traits,
                 species_id, // Step 8: Use speciation-assigned species ID
                 organism_type,
+                // Phase 2: individual learning about prey.
+                IndividualLearning::new(learning_rate),
                 Behavior::new(),
                 Alive,
             ))
@@ -309,13 +332,22 @@ pub fn update_behavior(
             &SpeciesId,
             &OrganismType,
             &Size,
+            Option<&IndividualLearning>,
         ),
         With<Alive>,
     >,
     world_grid: Res<WorldGrid>,
     spatial_hash: Res<SpatialHashGrid>,
     organism_query: Query<
-        (Entity, &Position, &SpeciesId, &OrganismType, &Size, &Energy),
+        (
+            Entity,
+            &Position,
+            &SpeciesId,
+            &OrganismType,
+            &Size,
+            &Energy,
+            &CachedTraits,
+        ),
         With<Alive>,
     >,
     mut sensory_cache: ResMut<crate::organisms::behavior::SensoryDataCache>, // Add cache
@@ -323,7 +355,7 @@ pub fn update_behavior(
 ) {
     let dt = time.delta_seconds();
 
-    for (entity, position, mut behavior, energy, cached_traits, species_id, organism_type, size) in
+    for (entity, position, mut behavior, energy, cached_traits, species_id, organism_type, size, learning_opt) in
         query.iter_mut()
     {
         // Update state time
@@ -380,6 +412,7 @@ pub fn update_behavior(
         let decision = decide_behavior_with_memory(
             energy,
             cached_traits,
+            *species_id,
             *organism_type,
             &sensory,
             behavior.state,
@@ -388,6 +421,7 @@ pub fn update_behavior(
             behavior.threat_timer,
             behavior.recent_threat,
             behavior.migration_target.is_some(),
+            learning_opt,
         );
 
         // Update behavior state and targets
@@ -486,28 +520,50 @@ pub fn handle_eating(
             &Behavior,
             &OrganismType,
             &Size,
+            Option<&CachedTraits>,
+            Option<&mut PredatorFeeding>,
         ),
-        With<Alive>,
+        (With<Alive>, Without<crate::organisms::components::ParentalAttachment>),
     >,
     mut world_grid: ResMut<WorldGrid>,
     tuning: Res<crate::organisms::EcosystemTuning>, // Step 8: Tuning parameters
-    _organism_query: Query<(&Position, &mut Energy, &Size), (With<Alive>, Without<Behavior>)>,
+    mut damage_writer: EventWriter<PredationDamageEvent>,
     time: Res<Time>,
+    mut param_set: ParamSet<(
+        Query<
+            (
+                Entity,
+                &crate::organisms::components::ParentalAttachment,
+                &mut Energy,
+                &crate::organisms::components::ChildGrowth,
+                &Age,
+            ),
+            With<Alive>,
+        >,
+    )>,
 ) {
     let dt = time.delta_seconds();
-    let consumption_rate = tuning.consumption_rate_base;
     let energy_conversion_efficiency = tuning.energy_conversion_efficiency;
 
-    for (_entity, position, mut energy, behavior, organism_type, _size) in query.iter_mut() {
+    for (entity, position, mut energy, behavior, organism_type, size, traits_opt, feeding_opt) in
+        query.iter_mut()
+    {
         if behavior.state != BehaviorState::Eating {
             continue;
         }
 
         // Get current cell
+               // Get current cell
         if let Some(cell) = world_grid.get_cell_mut(position.x(), position.y()) {
+            // Hard capped per-organism consumption rate (Phase 2).
+            let trait_consumption = traits_opt
+                .map(|t| t.consumption_rate)
+                .unwrap_or(tuning.consumption_rate_base);
+            let consumption_rate = trait_consumption;
+
             let consumed = match organism_type {
                 OrganismType::Producer => {
-                    // Producers consume sunlight, water, minerals
+                    // Producers are no longer spawned; keep logic for now.
                     let sunlight = cell
                         .get_resource(ResourceType::Sunlight)
                         .min(consumption_rate * dt);
@@ -537,30 +593,83 @@ pub fn handle_eating(
                     (sunlight + water + mineral) * energy_conversion_efficiency
                 }
                 OrganismType::Consumer => {
-                    // Consumers consume plants or prey resources
-                    let plant = cell
-                        .get_resource(ResourceType::Plant)
-                        .min(consumption_rate * dt);
+                    // Consumers eat plant percentages (herbivory),
+                    // attack live prey, and can feed on carcasses over multiple ticks.
+
+                    // 1) If we have a carcass to feed on, prioritize that.
+                    if let Some(mut feeding) = feeding_opt {
+                        let max_intake = (consumption_rate * dt).min(feeding.remaining_energy);
+                        if max_intake > 0.0 {
+                            feeding.remaining_energy -= max_intake;
+                            let gained = max_intake * energy_conversion_efficiency;
+                            energy.current = (energy.current + gained).min(energy.max);
+                        }
+
+                        // While feeding, skip other food sources.
+                        continue;
+                    }
+
+                    // 2) If we have a prey target entity, apply damage (RPG-style attack).
+                    if let Some(prey_entity) = behavior.target_entity {
+                        if let Some(traits) = traits_opt {
+                            let damage = traits.attack_strength * dt;
+                            if damage > 0.0 {
+                                damage_writer.send(PredationDamageEvent {
+                                    predator: entity,
+                                    prey: prey_entity,
+                                    damage,
+                                });
+                            }
+                        }
+                    }
+
+                    // Herbivory: consume a capped fraction of plant community.
+                    let max_fraction = (consumption_rate * dt).min(1.0);
+                    let mut remaining_fraction = max_fraction;
+                    let mut eaten_fraction = 0.0;
+
+                    if !cell.plant_community.is_empty() && remaining_fraction > 0.0 {
+                        for species in cell.plant_community.iter_mut() {
+                            if remaining_fraction <= 0.0 {
+                                break;
+                            }
+                            let bite = species.percentage.min(remaining_fraction);
+                            species.percentage -= bite;
+                            remaining_fraction -= bite;
+                            eaten_fraction += bite;
+                        }
+
+                        // Normalize after grazing.
+                        let sum: f32 =
+                            cell.plant_community.iter().map(|s| s.percentage).sum();
+                        if sum > 1.0 {
+                            let inv = 1.0 / sum;
+                            for s in cell.plant_community.iter_mut() {
+                                s.percentage *= inv;
+                            }
+                        }
+                    }
+
+                    // Simple mapping from eaten plant fraction to energy.
+                    let plant_energy =
+                        eaten_fraction * size.value() * energy_conversion_efficiency;
+
+                    // Legacy prey scalar resource (will be replaced).
                     let prey_resource = cell
                         .get_resource(ResourceType::Prey)
                         .min(consumption_rate * dt);
 
                     cell.set_resource(
-                        ResourceType::Plant,
-                        cell.get_resource(ResourceType::Plant) - plant,
-                    );
-                    cell.set_resource(
                         ResourceType::Prey,
                         cell.get_resource(ResourceType::Prey) - prey_resource,
                     );
-                    cell.add_pressure(ResourceType::Plant, plant);
                     cell.add_pressure(ResourceType::Prey, prey_resource);
 
-                    (plant + prey_resource * 2.0) * energy_conversion_efficiency
-                    // Prey is more nutritious
+                    let prey_energy = prey_resource * 2.0 * energy_conversion_efficiency;
+                    plant_energy + prey_energy
                 }
                 OrganismType::Decomposer => {
-                    // Decomposers consume detritus
+                    // Decomposers are no longer spawned; keep legacy behavior for now.
                     let detritus = cell
                         .get_resource(ResourceType::Detritus)
                         .min(consumption_rate * dt);
@@ -571,13 +680,46 @@ pub fn handle_eating(
                     );
                     cell.add_pressure(ResourceType::Detritus, detritus);
 
-                    // Step 8: Use tuning parameter for decomposer efficiency
-                    detritus * energy_conversion_efficiency * tuning.decomposer_efficiency_multiplier
+                    detritus
+                        * energy_conversion_efficiency
+                        * tuning.decomposer_efficiency_multiplier
                 }
             };
 
-            // Add energy (clamped to max)
-            energy.current = (energy.current + consumed).min(energy.max);
+            // Add energy (clamped to max) and handle meal sharing with attached children.
+            let mut parent_energy_gain = consumed;
+
+            if let (OrganismType::Consumer, Some(traits)) = (organism_type, traits_opt) {
+                if traits.meal_share_percentage > 0.0 {
+                    // First pass: collect child entities that need meal sharing
+                    let mut child_entities: Vec<Entity> = Vec::new();
+                    param_set.p0().for_each(|(child_entity, attachment, _child_energy, _child_growth, child_age)| {
+                        if attachment.parent == entity 
+                            && (child_age.0 as f32) <= attachment.care_until_age {
+                            child_entities.push(child_entity);
+                        }
+                    });
+
+                    if !child_entities.is_empty() {
+                        let share_total = (consumed * traits.meal_share_percentage)
+                            .min(energy.current + consumed);
+                        let per_child = share_total / child_entities.len() as f32;
+
+                        // Second pass: apply energy sharing
+                        param_set.p0().for_each_mut(|(child_entity, attachment, mut child_energy, _child_growth, child_age)| {
+                            if child_entities.contains(&child_entity) 
+                                && attachment.parent == entity 
+                                && (child_age.0 as f32) <= attachment.care_until_age {
+                                child_energy.current =
+                                    (child_energy.current + per_child).min(child_energy.max);
+                                parent_energy_gain -= per_child;
+                            }
+                        });
+                    }
+                }
+            }
+
+            energy.current = (energy.current + parent_energy_gain).min(energy.max);
         }
     }
 }
@@ -722,38 +864,85 @@ pub fn handle_reproduction(
             let mut spawned_species = None;
             for offspring_genome in event.genomes {
                 let cached = CachedTraits::from_genome(&offspring_genome);
-                let size = cached.size;
-                let max_energy = cached.max_energy;
+                let adult_size = cached.size;
+                let adult_max_energy = cached.max_energy;
                 let metabolism_rate = cached.metabolism_rate;
                 let movement_cost = cached.movement_cost;
                 let reproduction_cooldown = cached.reproduction_cooldown.max(1.0) as u32;
 
                 let offset = Vec2::new(rng.f32() * 10.0 - 5.0, rng.f32() * 10.0 - 5.0);
-                let initial_energy = (per_child_energy * 0.9)
-                    .min(max_energy)
-                    .max(max_energy * 0.15);
 
                 // Step 8: Assign species ID using speciation system
                 let offspring_species = species_tracker.find_or_create_species(&offspring_genome);
                 if spawned_species.is_none() {
                     spawned_species = Some(offspring_species);
                 }
-                
-                commands.spawn((
-                    Position::new(event.position.x + offset.x, event.position.y + offset.y),
-                    Velocity::new(0.0, 0.0),
-                    Energy::with_energy(max_energy, initial_energy),
-                    Age::new(),
-                    Size::new(size),
-                    Metabolism::new(metabolism_rate, movement_cost),
-                    ReproductionCooldown::new(reproduction_cooldown),
-                    offspring_genome,
-                    cached,
-                    offspring_species, // Step 8: Use speciation-assigned species ID
-                    event.organism_type,
-                    Behavior::new(),
-                    Alive,
-                ));
+
+                let spawn_position = Vec2::new(event.position.x + offset.x, event.position.y + offset.y);
+
+                match cached.spawn_type {
+                    crate::organisms::components::SpawnType::Egg => {
+                        // Spawn an egg entity – no Alive marker, so it won't behave/move.
+                        commands.spawn((
+                            Position::new(spawn_position.x, spawn_position.y),
+                            crate::organisms::components::Egg {
+                                parent: event.parent,
+                                incubation_time_remaining: cached.incubation_duration,
+                                incubation_type: cached.incubation_type,
+                            },
+                            offspring_genome,
+                            cached,
+                            offspring_species,
+                            event.organism_type,
+                        ));
+                    }
+                    crate::organisms::components::SpawnType::Baby => {
+                        // Spawn a baby organism directly with reduced stats (10% adult size/energy).
+                        let size_factor = 0.1;
+                        let child_size = adult_size * size_factor;
+                        let child_max_energy = adult_max_energy * 0.3;
+                        let initial_energy = (per_child_energy * 0.9)
+                            .min(child_max_energy)
+                            .max(child_max_energy * 0.2);
+
+                        let child_entity = commands
+                            .spawn((
+                                Position::new(spawn_position.x, spawn_position.y),
+                                Velocity::new(0.0, 0.0),
+                                Energy::with_energy(child_max_energy, initial_energy),
+                                Age::new(),
+                                Size::new(child_size),
+                                Metabolism::new(metabolism_rate, movement_cost),
+                                ReproductionCooldown::new(reproduction_cooldown),
+                                offspring_genome,
+                                cached,
+                                offspring_species,
+                                event.organism_type,
+                                IndividualLearning::new(parent_traits.learning_rate),
+                                Behavior::new(),
+                                Alive,
+                            ))
+                            .id();
+
+                        // Track parent-child relationship and attachment for care & learning.
+                        commands.entity(child_entity).insert(crate::organisms::components::ParentChildRelationship {
+                            parent: event.parent,
+                            child: child_entity,
+                            time_together: 0.0,
+                        });
+                        commands.entity(child_entity).insert(crate::organisms::components::ParentalAttachment {
+                            parent: event.parent,
+                            care_until_age: parent_traits.parental_care_age,
+                        });
+                        commands.entity(child_entity).insert(crate::organisms::components::ChildGrowth {
+                            growth: size_factor,
+                            base_rate: parent_traits.growth_rate,
+                            max_rate: parent_traits.max_growth_rate,
+                            food_deficit: 0.0,
+                            independence_age: parent_traits.parental_care_age,
+                        });
+                    }
+                }
             }
 
             parent_cooldown.reset(parent_traits.reproduction_cooldown.max(1.0) as u32);
@@ -775,15 +964,167 @@ pub fn handle_reproduction(
     }
 }
 
+/// Apply predation damage to prey organisms and generate carcasses for predators.
+pub fn apply_predation_damage(
+    mut commands: Commands,
+    mut events: EventReader<PredationDamageEvent>,
+    mut prey_query: Query<(Entity, &mut Energy, &Size, &SpeciesId), With<Alive>>,
+    mut predator_feeding_query: Query<&mut PredatorFeeding>,
+    mut predator_learning_query: Query<&mut IndividualLearning>,
+    predator_traits_query: Query<&CachedTraits, With<Alive>>,
+) {
+    use std::collections::HashMap;
+
+    // Group attacks by prey to compute pack-based bonuses.
+    let mut attacks_by_prey: HashMap<Entity, Vec<PredationDamageEvent>> = HashMap::new();
+    for ev in events.read() {
+        attacks_by_prey.entry(ev.prey).or_default().push(*ev);
+    }
+
+    for (prey_entity, attacks) in attacks_by_prey {
+        if let Ok((_, mut energy, size, species_id)) = prey_query.get_mut(prey_entity) {
+            if energy.current <= 0.0 {
+                continue;
+            }
+
+            let mut total_damage = 0.0_f32;
+            let pack_size = attacks.len() as f32;
+
+            // Apply each predator's damage with a pack coordination bonus.
+            for ev in &attacks {
+                let base_damage = ev.damage;
+                if base_damage <= 0.0 {
+                    continue;
+                }
+
+                let coord = predator_traits_query
+                    .get(ev.predator)
+                    .map(|t| t.coordination)
+                    .unwrap_or(0.0);
+
+                // Pack bonus: up to ~2x damage when many well-coordinated predators attack.
+                let pack_factor = if pack_size > 1.0 {
+                    let mult = 1.0 + coord * (pack_size.sqrt() - 1.0).max(0.0);
+                    mult.clamp(1.0, 2.0)
+                } else {
+                    1.0
+                };
+
+                total_damage += base_damage * pack_factor;
+            }
+
+            if total_damage <= 0.0 {
+                continue;
+            }
+
+            let before = energy.current;
+            energy.current = (energy.current - total_damage).max(0.0);
+
+            if before > 0.0 && energy.current <= 0.0 {
+                // Prey died from this coordinated attack: create a shared carcass.
+                let carcass_energy_total = size.value().max(0.1) * 8.0;
+                let share_per_pred = carcass_energy_total / pack_size.max(1.0);
+
+                for ev in &attacks {
+                    if let Ok(mut feeding) = predator_feeding_query.get_mut(ev.predator) {
+                        feeding.remaining_energy += share_per_pred;
+                    } else {
+                        commands
+                            .entity(ev.predator)
+                            .insert(PredatorFeeding { remaining_energy: share_per_pred });
+                    }
+
+                    // Update each predator's learning about this prey species.
+                    if let Ok(mut learning) = predator_learning_query.get_mut(ev.predator) {
+                        learning.update_on_success(species_id.value());
+                    }
+                }
+
+                // Mark prey as killed by predation for death handling.
+                commands
+                    .entity(prey_entity)
+                    .insert(crate::organisms::components::KilledByPredation);
+            }
+        }
+    }
+}
+
+/// Parent-child knowledge transfer system.
+pub fn update_parent_child_learning(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut children_query: Query<
+        (
+            Entity,
+            &mut crate::organisms::components::ParentChildRelationship,
+            &mut IndividualLearning,
+            &Position,
+            &CachedTraits,
+        ),
+        With<Alive>,
+    >,
+    parents_query: Query<(&Position, &IndividualLearning, &CachedTraits), (With<Alive>, Without<crate::organisms::components::ParentChildRelationship>)>,
+) {
+    let dt = time.delta_seconds();
+
+    for (child_entity, mut rel, mut child_learning, child_pos, child_traits) in
+        children_query.iter_mut()
+    {
+        if let Ok((parent_pos, parent_learning, parent_traits)) = parents_query.get(rel.parent) {
+            let distance = (child_pos.as_vec2() - parent_pos.as_vec2()).length();
+            if distance < 20.0 {
+                rel.time_together += dt;
+                // Continuous knowledge transfer: blend child toward parent using genome-driven rate.
+                let base_rate = parent_traits.knowledge_transfer_rate
+                    .max(child_traits.knowledge_transfer_rate)
+                    .max(0.05);
+                let transfer_rate = base_rate * dt;
+                for (prey_id, parent_score) in parent_learning.prey_knowledge.iter() {
+                    let child_score = child_learning.get_score(*prey_id);
+                    let updated =
+                        child_score + (*parent_score - child_score) * transfer_rate;
+                    child_learning
+                        .prey_knowledge
+                        .insert(*prey_id, updated.clamp(0.0, 1.0));
+                }
+            }
+        } else {
+            // Parent no longer exists – remove relationship.
+            commands
+                .entity(child_entity)
+                .remove::<crate::organisms::components::ParentChildRelationship>();
+        }
+    }
+}
+
 /// Handle organism death (remove entities with zero energy)
 pub fn handle_death(
     mut commands: Commands,
     mut tracked: ResMut<TrackedOrganism>,
     mut spatial_hash: ResMut<SpatialHashGrid>,
-    query: Query<(Entity, &Energy), With<Alive>>,
+    mut world_grid: ResMut<WorldGrid>,
+    query: Query<(Entity, &Energy, &Position, &Size), (With<Alive>, Without<crate::organisms::components::ParentalAttachment>)>,
+    mut children_query: Query<
+        (
+            Entity,
+            &mut crate::organisms::components::ParentalAttachment,
+            &mut Energy,
+            &CachedTraits,
+            &mut crate::organisms::components::ParentChildRelationship,
+            &Position,
+        ),
+        With<Alive>,
+    >,
+    mut predation_flags: Query<&mut crate::organisms::components::KilledByPredation>,
 ) {
-    for (entity, energy) in query.iter() {
+    for (entity, energy, position, size) in query.iter() {
         if energy.is_dead() {
+            // Add nutrients to the cell from animal biomass.
+            if let Some(cell) = world_grid.get_cell_mut(position.x(), position.y()) {
+                let biomass = size.value().max(0.1);
+                cell.animal_nutrients += biomass * 0.05;
+            }
+
             if tracked.entity == Some(entity) {
                 info!(
                     "[TRACKED] Organism died! Final energy: {:.2}",
@@ -792,6 +1133,39 @@ pub fn handle_death(
                 tracked.entity = None; // Clear tracking
             }
             info!("Organism died at energy level: {:.2}", energy.current);
+
+            // Handle attached children depending on cause of death.
+            let killed_by_predation = predation_flags.get_mut(entity).is_ok();
+            for (child_entity, mut attachment, mut child_energy, child_traits, mut rel, child_pos) in
+                children_query.iter_mut()
+            {
+                if attachment.parent == entity {
+                    if killed_by_predation {
+                        // If parent was hunted, child dies with parent.
+                        child_energy.current = 0.0;
+                    } else {
+                        // Other causes: try to reattach to a new caregiver if allowed.
+                        if child_traits.father_provides_care {
+                            // Find nearest alive conspecific as a surrogate "father".
+                            if let Some((new_parent, _dist)) = find_nearest_caregiver(
+                                entity,
+                                child_pos,
+                                &child_traits,
+                            ) {
+                                attachment.parent = new_parent;
+                                rel.parent = new_parent;
+                                rel.time_together = 0.0;
+                                continue;
+                            }
+                        }
+                        // No suitable caregiver: child becomes independent.
+                        commands
+                            .entity(child_entity)
+                            .remove::<crate::organisms::components::ParentalAttachment>();
+                    }
+                }
+            }
+
             // Remove from spatial hash before despawning
             spatial_hash.organisms.remove(entity);
             commands.entity(entity).despawn();

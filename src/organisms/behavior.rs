@@ -77,11 +77,28 @@ impl Behavior {
     }
 }
 
-/// Sensory information about nearby entities
+/// Information about a nearby organism detected by senses.
+#[derive(Debug, Clone)]
+pub struct NearbyOrganism {
+    pub entity: Entity,
+    pub position: Vec2,
+    pub distance: f32,
+    pub species_id: SpeciesId,
+    pub organism_type: OrganismType,
+    pub is_predator: bool,
+    pub is_prey: bool,
+    pub is_mate: bool,
+    pub size: f32,
+    pub speed: f32,
+    pub armor: f32,
+    pub poison_strength: f32,
+}
+
+/// Sensory information about nearby entities and resources.
 #[derive(Debug, Clone)]
 pub struct SensoryData {
-    /// Nearby organisms (entity, position, distance, is_predator, is_prey, is_mate)
-    pub nearby_organisms: Vec<(Entity, Vec2, f32, bool, bool, bool)>,
+    /// Nearby organisms detected this frame.
+    pub nearby_organisms: Vec<NearbyOrganism>,
     /// Nearby resources (position, resource_type, distance, value)
     pub nearby_resources: Vec<(Vec2, ResourceType, f32, f32)>,
     /// Current cell resource values
@@ -165,7 +182,15 @@ pub fn collect_sensory_data(
     world_grid: &WorldGrid,
     spatial_hash: &crate::utils::SpatialHash,
     organism_query: &Query<
-        (Entity, &Position, &SpeciesId, &OrganismType, &Size, &Energy),
+        (
+            Entity,
+            &Position,
+            &SpeciesId,
+            &OrganismType,
+            &Size,
+            &Energy,
+            &crate::organisms::components::CachedTraits,
+        ),
         With<Alive>,
     >,
 ) -> SensoryData {
@@ -185,7 +210,7 @@ pub fn collect_sensory_data(
             continue; // Skip self
         }
 
-        if let Ok((_, other_pos, other_species, other_type, other_size, other_energy)) =
+        if let Ok((_, other_pos, other_species, other_type, other_size, other_energy, other_traits)) =
             organism_query.get(other_entity)
         {
             // Use squared distance to avoid sqrt
@@ -198,7 +223,7 @@ pub fn collect_sensory_data(
                 let is_mate = *other_species == species_id
                     && *other_type == organism_type
                     && !other_energy.is_dead()
-                    && distance_sq <= (sensory_range * 0.5).powi(2); // Use squared for mate check
+                    && distance_sq <= (sensory_range * 0.5).powi(2);
 
                 if is_predator {
                     match &mut sensory.nearest_predator {
@@ -207,14 +232,20 @@ pub fn collect_sensory_data(
                     }
                 }
 
-                sensory.nearby_organisms.push((
-                    other_entity,
-                    other_pos.0,
+                sensory.nearby_organisms.push(NearbyOrganism {
+                    entity: other_entity,
+                    position: other_pos.0,
                     distance,
+                    species_id: *other_species,
+                    organism_type: *other_type,
                     is_predator,
                     is_prey,
                     is_mate,
-                ));
+                    size: other_size.value(),
+                    speed: other_traits.speed,
+                    armor: other_traits.armor,
+                    poison_strength: other_traits.poison_strength,
+                });
             }
         }
     }
@@ -352,6 +383,7 @@ pub struct BehaviorDecision {
 pub fn decide_behavior_with_memory(
     energy: &Energy,
     cached_traits: &crate::organisms::components::CachedTraits,
+    species_id: SpeciesId,
     organism_type: OrganismType,
     sensory: &SensoryData,
     current_state: BehaviorState,
@@ -360,7 +392,8 @@ pub fn decide_behavior_with_memory(
     threat_timer: f32,
     recent_threat: Option<Vec2>,
     has_migration_target: bool,
-) -> BehaviorDecision {
+    learning: Option<&crate::organisms::components::IndividualLearning>,
+    ) -> BehaviorDecision {
     // Step 8: Improved behavior differentiation between organism types
     // Priority system: Survival > Reproduction > Exploration
     
@@ -492,7 +525,7 @@ pub fn decide_behavior_with_memory(
     
     // CONSUMERS: Active hunting, more movement, aggressive behaviors
     // (Original behavior logic for consumers)
-    if let Some((entity, pred_pos, distance)) = sensory.nearest_predator {
+        if let Some((entity, pred_pos, distance)) = sensory.nearest_predator {
         let flee_threshold = 8.0 + (boldness * 14.0) + (risk_tolerance * 6.0);
         let memory_bonus = if threat_timer > 0.0 { 5.0 } else { 0.0 };
         if distance < flee_threshold + memory_bonus {
@@ -521,24 +554,34 @@ pub fn decide_behavior_with_memory(
     if hunger_pressure > hunger_barrier {
         // Consumers actively hunt prey
         if energy.ratio() > 0.4 && aggression > 0.4 {
-            if let Some((entity, prey_pos, distance, _, _is_prey, _)) = sensory
-                .nearby_organisms
-                .iter()
-                .filter(|(_, _, _, _, is_prey, _)| *is_prey)
-                .min_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
-            {
-                if *distance < 5.0 {
+            // Estimate local pack size (self + nearby same-species consumers).
+            let pack_size_estimate = 1.0
+                + sensory
+                    .nearby_organisms
+                    .iter()
+                    .filter(|o| o.organism_type == OrganismType::Consumer && o.species_id == species_id)
+                    .count() as f32;
+
+            if let Some(best_prey) = select_best_prey(
+                sensory,
+                cached_traits,
+                learning,
+                cached_traits.size,
+                hunger_pressure,
+                pack_size_estimate,
+            ) {
+                if best_prey.distance < 5.0 {
                     return BehaviorDecision {
                         state: BehaviorState::Eating,
-                        target_entity: Some(*entity),
-                        target_position: Some(*prey_pos),
+                        target_entity: Some(best_prey.entity),
+                        target_position: Some(best_prey.position),
                         migration_target: None,
                     };
-                } else if *distance < 30.0 {
+                } else if best_prey.distance < 30.0 {
                     return BehaviorDecision {
                         state: BehaviorState::Chasing,
-                        target_entity: Some(*entity),
-                        target_position: Some(*prey_pos),
+                        target_entity: Some(best_prey.entity),
+                        target_position: Some(best_prey.position),
                         migration_target: None,
                     };
                 }
@@ -579,17 +622,17 @@ pub fn decide_behavior_with_memory(
 
     let reproduction_threshold = cached_traits.reproduction_threshold;
     if energy.ratio() >= reproduction_threshold {
-        if let Some((entity, mate_pos, distance, _, _, _is_mate)) = sensory
+        if let Some(best_mate) = sensory
             .nearby_organisms
             .iter()
-            .filter(|(_, _, _, _, _, is_mate)| *is_mate)
-            .min_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
+            .filter(|o| o.is_mate)
+            .min_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap_or(std::cmp::Ordering::Equal))
         {
-            if *distance < 15.0 {
+            if best_mate.distance < 15.0 {
                 return BehaviorDecision {
                     state: BehaviorState::Mating,
-                    target_entity: Some(*entity),
-                    target_position: Some(*mate_pos),
+                    target_entity: Some(best_mate.entity),
+                    target_position: Some(best_mate.position),
                     migration_target: None,
                 };
             }
@@ -627,10 +670,105 @@ pub fn decide_behavior_with_memory(
     }
 }
 
+/// Select the best prey target based on physical factors and learned knowledge.
+fn select_best_prey(
+    sensory: &SensoryData,
+    cached_traits: &crate::organisms::components::CachedTraits,
+    learning: Option<&crate::organisms::components::IndividualLearning>,
+    predator_size: f32,
+    hunger_pressure: f32,
+    pack_size_estimate: f32,
+) -> Option<NearbyOrganism> {
+    let mut best: Option<(NearbyOrganism, f32)> = None;
+
+    let base_speed = cached_traits.speed;
+    let desperation = hunger_pressure.clamp(0.0, 1.5); // higher when very hungry
+
+    for candidate in sensory.nearby_organisms.iter().filter(|o| o.is_prey) {
+        // --- Size factor ---
+        let size_ratio = (predator_size / (candidate.size.max(0.1))).clamp(0.1, 4.0);
+        let size_score = if size_ratio >= 1.0 {
+            0.6 + (size_ratio - 1.0).min(1.5) * 0.3
+        } else {
+            (0.25 * size_ratio) * (0.5 + desperation)
+        };
+
+        // --- Speed factor ---
+        let prey_speed = candidate.speed.max(0.1);
+        let relative_speed = (base_speed / prey_speed).clamp(0.2, 3.0);
+        let speed_score = if relative_speed >= 1.0 {
+            0.5 + (relative_speed - 1.0) * 0.3
+        } else {
+            (0.3 * relative_speed) * (0.5 + desperation * 0.5)
+        };
+
+        // --- Defense factor (armor + poison) ---
+        let defense_score = candidate.armor * 0.7 + candidate.poison_strength * 0.8;
+        let defense_penalty = defense_score * (1.0 - cached_traits.risk_tolerance).max(0.2);
+        let defense_factor = (1.0 - defense_penalty).clamp(0.2, 1.0);
+
+        // --- Pack factor ---
+        let pack_factor = if pack_size_estimate > 1.0 {
+            let pack_bonus =
+                (pack_size_estimate.sqrt() - 1.0).max(0.0) * cached_traits.coordination;
+            (1.0 + pack_bonus).clamp(1.0, 2.0)
+        } else {
+            1.0
+        };
+
+        // --- Strategy factor ---
+        let strategy_factor = match cached_traits.hunting_strategy {
+            crate::organisms::components::HuntingStrategy::Ambush => {
+                // Ambush: likes close, slower prey.
+                let dist_pref = (20.0 / (candidate.distance + 5.0)).clamp(0.5, 2.0);
+                let speed_pref = (prey_speed / (base_speed + 0.1)).clamp(0.3, 1.2);
+                dist_pref * (1.3 - 0.3 * speed_pref)
+            }
+            crate::organisms::components::HuntingStrategy::Pursuit => {
+                // Pursuit: likes long chases, gains when faster than prey.
+                (relative_speed * 0.7 + 0.6).clamp(0.5, 2.0)
+            }
+            crate::organisms::components::HuntingStrategy::Pack => {
+                // Pack: strongly prefers when others present.
+                (1.0 + (pack_size_estimate - 1.0) * 0.5).clamp(1.0, 3.0)
+            }
+        };
+
+        // --- Distance cost: closer prey is better ---
+        let distance_cost = (candidate.distance / (base_speed + 1.0)).clamp(0.0, 5.0);
+
+        // --- Learned knowledge about this prey species ---
+        let knowledge = learning
+            .map(|l| l.get_score(candidate.species_id.value()))
+            .unwrap_or(0.4);
+        let knowledge_bonus = 0.5 + knowledge * 0.5; // 0.5–1.0
+
+        // --- Desperation mechanics ---
+        let desperation_bonus = 0.7 + desperation * 0.6;
+
+        let score = size_score
+            * speed_score
+            * defense_factor
+            * pack_factor
+            * strategy_factor
+            * knowledge_bonus
+            * desperation_bonus
+            - distance_cost * 0.25;
+
+        match &best {
+            Some((_, best_score)) if score <= *best_score => {}
+            _ => best = Some((candidate.clone(), score)),
+        }
+    }
+
+    best.map(|(o, _)| o)
+}
+
 pub fn decide_behavior(
     energy: &Energy,
     cached_traits: &crate::organisms::components::CachedTraits,
     organism_type: OrganismType,
+    species_id: SpeciesId,
     sensory: &SensoryData,
     current_state: BehaviorState,
     state_time: f32,
@@ -638,6 +776,7 @@ pub fn decide_behavior(
     let decision = decide_behavior_with_memory(
         energy,
         cached_traits,
+        species_id,
         organism_type,
         sensory,
         current_state,
@@ -646,6 +785,7 @@ pub fn decide_behavior(
         0.0,
         None,
         false,
+        None,
     );
     (
         decision.state,

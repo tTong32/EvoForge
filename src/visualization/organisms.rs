@@ -33,6 +33,11 @@ pub fn spawn_organism_sprites(
     // Spawn sprites for organisms without sprites
     for (organism_entity, position, organism_type, energy, size, species_id) in organism_query.iter()
     {
+        // Phase 1: only visualize consumer organisms; plants are cell-based.
+        if *organism_type != OrganismType::Consumer {
+            continue;
+        }
+
         if existing_organisms.contains(&organism_entity) {
             continue;
         }

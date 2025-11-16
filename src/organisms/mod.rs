@@ -7,6 +7,8 @@ mod tuning;
 mod ecosystem_stats;
 mod disease;
 mod coevolution;
+mod plant_traits;
+mod offspring;
 
 pub use behavior::*;
 use bevy::prelude::*;
@@ -17,6 +19,7 @@ pub use tuning::*;
 pub use ecosystem_stats::*;
 pub use disease::*;
 pub use coevolution::*;
+pub use plant_traits::*;
 
 // Re-export specific types for visualization
 pub use disease::Infected;
@@ -35,6 +38,7 @@ impl Plugin for OrganismPlugin {
             .init_resource::<ecosystem_stats::EcosystemStats>() // Step 8: Ecosystem statistics
             .init_resource::<disease::DiseaseSystem>() // Step 9: Disease system
             .init_resource::<coevolution::CoEvolutionSystem>() // Step 9: Co-evolution system
+            .add_event::<systems::PredationDamageEvent>()
             .add_systems(Startup, systems::spawn_initial_organisms)
             .add_systems(
                 Update,
@@ -44,15 +48,22 @@ impl Plugin for OrganismPlugin {
                     systems::update_behavior,
                     systems::update_movement,
                     systems::handle_eating,
+                    systems::apply_predation_damage,
                     systems::update_age,
                     systems::handle_reproduction,
-                    systems::handle_death,
-                    update_speciation, // Step 8: Update species assignments
-                    disease::update_disease_system, // Step 9: Update diseases (spawn and spread)
-                    disease::update_infected_organisms_system, // Step 9: Update infected organisms (damage)
-                    coevolution::update_coevolution_system, // Step 9: Update co-evolution
                 )
-                    .chain(),
+            )
+            .add_systems(
+                Update,
+                (
+                    systems::handle_death,
+                    offspring::update_egg_incubation,
+                    systems::update_parent_child_learning,
+                    update_speciation,
+                    disease::update_disease_system,
+                    disease::update_infected_organisms_system,
+                    coevolution::update_coevolution_system,
+                )
             )
             .add_systems(
                 Update,
@@ -60,7 +71,8 @@ impl Plugin for OrganismPlugin {
                     ecosystem_stats::collect_ecosystem_stats, // Step 8: Ecosystem statistics
                     systems::log_all_organisms,
                     systems::log_tracked_organism,
-                ).chain(),
+                )
             );
     }
 }
+

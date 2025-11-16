@@ -7,9 +7,9 @@ pub const CHUNK_SIZE: usize = 64;
 /// Chunks are stored sparsely (only active chunks exist in memory)
 #[derive(Debug)]
 pub struct Chunk {
-    /// The cells in this chunk, stored as a boxed array to avoid stack overflow
+    /// The cells in this chunk, stored as a Vec to avoid stack overflow
     /// Access: cells[y * CHUNK_SIZE + x]
-    cells: Box<[Cell; CHUNK_SIZE * CHUNK_SIZE]>,
+    cells: Vec<Cell>,
     /// Chunk coordinates in chunk-space (not world-space)
     pub chunk_x: i32,
     pub chunk_y: i32,
@@ -23,8 +23,9 @@ pub struct Chunk {
 impl Chunk {
     /// Create a new chunk at the specified chunk coordinates
     pub fn new(chunk_x: i32, chunk_y: i32) -> Self {
-        // Use Box::new to allocate on heap instead of stack to avoid stack overflow
-        let cells = Box::new([Cell::new(); CHUNK_SIZE * CHUNK_SIZE]);
+        // Use Vec to allocate on heap directly, avoiding stack overflow
+        let mut cells = Vec::with_capacity(CHUNK_SIZE * CHUNK_SIZE);
+        cells.resize_with(CHUNK_SIZE * CHUNK_SIZE, Cell::new);
         Self {
             cells,
             chunk_x,
@@ -82,12 +83,12 @@ impl Chunk {
     }
 
     /// Get all cells in this chunk (for iteration)
-    pub fn cells(&self) -> &[Cell; CHUNK_SIZE * CHUNK_SIZE] {
+    pub fn cells(&self) -> &[Cell] {
         &self.cells
     }
 
     /// Get mutable access to all cells (marks chunk as dirty)
-    pub fn cells_mut(&mut self) -> &mut [Cell; CHUNK_SIZE * CHUNK_SIZE] {
+    pub fn cells_mut(&mut self) -> &mut [Cell] {
         self.dirty = true;
         &mut self.cells
     }
