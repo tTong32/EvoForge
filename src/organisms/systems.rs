@@ -264,11 +264,6 @@ pub fn update_spatial_hash(
             tracker.previous_positions.insert(entity, current_pos);
         }
     }
-
-    // Finally, clean up entries that no longer exist (safety check)
-    tracker.previous_positions.retain(|entity, _| {
-        query.get(*entity).is_ok()
-    });
 }
 
 /// Update metabolism - organisms consume energy over time
