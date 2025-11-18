@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use glam::Vec2;
 use crate::organisms::components::{Position, Energy, SpeciesId, Alive, CachedTraits};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Disease system resource
 #[derive(Resource, Debug)]
@@ -23,6 +23,38 @@ impl Default for DiseaseSystem {
             species_resistance: HashMap::new(),
             total_diseases: 0,
             spawn_cooldown: 800.0, // Initial cooldown
+        }
+    }
+}
+
+/// Resource-backed buffers for disease system to avoid allocations (optimization)
+#[derive(Resource, Default)]
+pub struct DiseaseSystemBuffers {
+    /// Reusable buffer for new infections
+    pub new_infections: Vec<(Entity, u32)>,
+    /// Reusable HashMap for infected organisms by disease ID
+    pub infected_by_disease: HashMap<u32, Vec<(Entity, Vec2)>>,
+    /// Reusable HashSet for infected entities
+    pub infected_entities: HashSet<Entity>,
+    /// Reusable HashSet for tracking infections this tick
+    pub infected_this_tick: HashSet<Entity>,
+    /// Reusable Vec for entities to remove
+    pub to_remove: Vec<Entity>,
+    /// Reusable HashMap for species traits
+    pub species_traits: HashMap<u32, Vec<f32>>,
+}
+
+impl DiseaseSystemBuffers {
+    pub fn clear(&mut self) {
+        self.new_infections.clear();
+        for vec in self.infected_by_disease.values_mut() {
+            vec.clear();
+        }
+        self.infected_entities.clear();
+        self.infected_this_tick.clear();
+        self.to_remove.clear();
+        for vec in self.species_traits.values_mut() {
+            vec.clear();
         }
     }
 }
@@ -107,6 +139,7 @@ pub fn update_disease_system(
         &organism_query,
         &infected_query,
         &spatial_hash,
+        &mut buffers,
         dt,
     );
 }
@@ -115,6 +148,7 @@ pub fn update_disease_system(
 pub fn update_infected_organisms_system(
     mut commands: Commands,
     disease_system: Res<DiseaseSystem>,
+    mut buffers: ResMut<DiseaseSystemBuffers>, // Optimization: reuse buffers
     mut infected_query: Query<(Entity, &mut Infected, &mut Energy, &SpeciesId), With<Alive>>,
     time: Res<Time>,
 ) {
@@ -123,6 +157,7 @@ pub fn update_infected_organisms_system(
         &mut commands,
         &disease_system,
         &mut infected_query,
+        &mut buffers,
         dt,
     );
 }
@@ -134,27 +169,29 @@ fn spread_diseases(
     organism_query: &Query<(Entity, &Position, &SpeciesId), With<Alive>>,
     infected_query: &Query<(Entity, &Position, &Infected), With<Alive>>,
     spatial_hash: &Res<crate::utils::SpatialHashGrid>,
+    buffers: &mut DiseaseSystemBuffers, // Optimization: reuse buffers
     dt: f32,
 ) {
-    let mut new_infections = Vec::new();
+    // Clear and reuse buffers from previous frame
+    buffers.clear();
+    buffers.new_infections.clear();
 
     // Create a set of infected entities by disease ID for quick lookup
-    let mut infected_by_disease: std::collections::HashMap<u32, Vec<(Entity, Vec2)>> = std::collections::HashMap::new();
     for (entity, pos, infected) in infected_query.iter() {
-        infected_by_disease
+        buffers.infected_by_disease
             .entry(infected.disease_id)
             .or_insert_with(Vec::new)
             .push((entity, Vec2::new(pos.x(), pos.y())));
     }
 
     // Create a set of all infected entities for quick lookup
-    let infected_entities: std::collections::HashSet<Entity> = infected_query.iter()
-        .map(|(entity, _, _)| entity)
-        .collect();
+    buffers.infected_entities.extend(
+        infected_query.iter().map(|(entity, _, _)| entity)
+    );
 
     for disease in &disease_system.active_diseases {
         // Get all organisms infected with this disease
-        if let Some(infected_organisms) = infected_by_disease.get(&disease.id) {
+        if let Some(infected_organisms) = buffers.infected_by_disease.get(&disease.id) {
             // For each infected organism, try to spread to nearby uninfected organisms
             for (infected_entity, infected_pos) in infected_organisms {
                 let nearby_entities = spatial_hash.organisms.query_radius(*infected_pos, disease.contagion_radius);
@@ -166,7 +203,7 @@ fn spread_diseases(
                     }
 
                     // Skip if already infected (any disease)
-                    if infected_entities.contains(&nearby_entity) {
+                    if buffers.infected_entities.contains(&nearby_entity) {
                         continue;
                     }
 
@@ -197,7 +234,7 @@ fn spread_diseases(
                         let infection_chance = disease.virulence * distance_factor * (1.0 - resistance) * dt * 0.1;
                         
                         if fastrand::f32() < infection_chance {
-                            new_infections.push((entity, disease.id));
+                            buffers.new_infections.push((entity, disease.id));
                             break; // Only one infection per disease per tick per organism
                         }
                     }
@@ -207,15 +244,14 @@ fn spread_diseases(
     }
 
     // Apply new infections using commands (avoid duplicates)
-    let mut infected_this_tick = std::collections::HashSet::new();
-    for (entity, disease_id) in new_infections {
-        if !infected_this_tick.contains(&entity) {
-            commands.entity(entity).insert(Infected {
-                disease_id,
+    for (entity, disease_id) in &buffers.new_infections {
+        if !buffers.infected_this_tick.contains(entity) {
+            commands.entity(*entity).insert(Infected {
+                disease_id: *disease_id,
                 infection_time: 0.0,
                 damage_accumulated: 0.0,
             });
-            infected_this_tick.insert(entity);
+            buffers.infected_this_tick.insert(*entity);
             info!("[DISEASE] Organism {:?} infected with disease {}", entity, disease_id);
         }
     }
@@ -226,9 +262,10 @@ fn update_infected_organisms(
     commands: &mut Commands,
     disease_system: &DiseaseSystem,
     infected_query: &mut Query<(Entity, &mut Infected, &mut Energy, &SpeciesId), With<Alive>>,
+    buffers: &mut DiseaseSystemBuffers, // Optimization: reuse buffers
     dt: f32,
 ) {
-    let mut to_remove = Vec::new();
+    buffers.to_remove.clear();
 
     for (entity, mut infected, mut energy, species_id) in infected_query.iter_mut() {
         // Find disease
@@ -250,21 +287,21 @@ fn update_infected_organisms(
             // Remove infection if organism dies, disease expires, or organism recovered
             if energy.current <= 0.0 {
                 // Organism died - will be handled by death system
-                to_remove.push(entity);
+                buffers.to_remove.push(entity);
             } else if infected.infection_time > disease.duration {
                 // Disease expired - organism recovered
-                to_remove.push(entity);
+                buffers.to_remove.push(entity);
                 info!("[DISEASE] Organism {:?} recovered from disease {}", entity, disease.id);
             }
         } else {
             // Disease no longer exists - remove infection
-            to_remove.push(entity);
+            buffers.to_remove.push(entity);
         }
     }
 
     // Remove infection components
-    for entity in to_remove {
-        commands.entity(entity).remove::<Infected>();
+    for entity in &buffers.to_remove {
+        commands.entity(*entity).remove::<Infected>();
     }
 }
 
@@ -326,6 +363,7 @@ fn spawn_random_disease(
 /// Update species resistance based on evolution (called from genetics system)
 pub fn update_species_resistance(
     mut disease_system: ResMut<DiseaseSystem>,
+    mut buffers: ResMut<DiseaseSystemBuffers>, // Optimization: reuse buffers
     _species_tracker: Res<crate::organisms::speciation::SpeciesTracker>,
     organism_query: Query<(&SpeciesId, &CachedTraits)>,
 ) {
@@ -333,23 +371,28 @@ pub fn update_species_resistance(
     // This would be calculated from genome traits in a real implementation
     // For now, we'll use a placeholder that gets resistance from cached traits
     
-    // Group organisms by species
-    let mut species_traits: HashMap<u32, Vec<f32>> = HashMap::new();
+    // Clear and reuse buffer
+    for vec in buffers.species_traits.values_mut() {
+        vec.clear();
+    }
     
+    // Group organisms by species
     for (species_id, traits) in organism_query.iter() {
         let species_id_val = species_id.value();
         // Use a trait index for disease resistance (would need to add to CachedTraits)
         // For now, use risk_tolerance as a proxy (higher risk tolerance = lower resistance)
         let resistance_proxy = 1.0 - traits.risk_tolerance;
-        species_traits
+        buffers.species_traits
             .entry(species_id_val)
             .or_insert_with(Vec::new)
             .push(resistance_proxy);
     }
 
     // Calculate average resistance per species
-    for (species_id, resistances) in species_traits {
-        let avg_resistance = resistances.iter().sum::<f32>() / resistances.len() as f32;
-        disease_system.species_resistance.insert(species_id, avg_resistance);
+    for (species_id, resistances) in &buffers.species_traits {
+        if !resistances.is_empty() {
+            let avg_resistance = resistances.iter().sum::<f32>() / resistances.len() as f32;
+            disease_system.species_resistance.insert(*species_id, avg_resistance);
+        }
     }
 }

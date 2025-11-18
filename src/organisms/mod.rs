@@ -31,13 +31,20 @@ impl Plugin for OrganismPlugin {
         app.init_resource::<systems::TrackedOrganism>()
             .init_resource::<systems::AllOrganismsLogger>()
             .init_resource::<systems::SpatialHashTracker>()
+            .init_resource::<systems::PredationEventGrouping>() // Optimization: reuse HashMap
+            .init_resource::<systems::SpatialQueryBuffer>() // Optimization: reuse Vec buffer for spatial queries
+            .init_resource::<systems::ReproductionEventBuffer>() // Optimization: reuse Vec buffer for reproduction events
+            .init_resource::<systems::GlobalRng>() // Optimization: resource-backed RNG
+            .init_resource::<systems::EligibleChildrenSet>() // Optimization: reuse HashSet for eligible children
             .init_resource::<crate::utils::SpatialHashGrid>()
             .init_resource::<behavior::SensoryDataCache>() // Add sensory cache (optimization 3)
             .init_resource::<speciation::SpeciesTracker>() // Step 8: Speciation system
             .init_resource::<tuning::EcosystemTuning>() // Step 8: Tuning parameters
             .init_resource::<ecosystem_stats::EcosystemStats>() // Step 8: Ecosystem statistics
             .init_resource::<disease::DiseaseSystem>() // Step 9: Disease system
+            .init_resource::<disease::DiseaseSystemBuffers>() // Optimization: reuse disease system buffers
             .init_resource::<coevolution::CoEvolutionSystem>() // Step 9: Co-evolution system
+            .init_resource::<coevolution::CoEvolutionSystemBuffers>() // Optimization: reuse coevolution system buffers
             .add_event::<systems::PredationDamageEvent>()
             .add_systems(Startup, systems::spawn_initial_organisms)
             .add_systems(

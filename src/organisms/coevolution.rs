@@ -32,6 +32,30 @@ impl Default for CoEvolutionSystem {
     }
 }
 
+/// Resource-backed buffers for coevolution system to avoid allocations (optimization)
+#[derive(Resource, Default)]
+pub struct CoEvolutionSystemBuffers {
+    /// Reusable HashMap for grouping organisms by species
+    pub species_groups: HashMap<u32, Vec<(OrganismType, CachedTraits)>>,
+    /// Reusable Vec for species IDs
+    pub species_ids: Vec<u32>,
+    /// Reusable HashMap for species defense needs
+    pub species_defense_needs: HashMap<u32, DefenseTraits>,
+    /// Reusable HashMap for species counts
+    pub species_counts: HashMap<u32, u32>,
+}
+
+impl CoEvolutionSystemBuffers {
+    pub fn clear(&mut self) {
+        for vec in self.species_groups.values_mut() {
+            vec.clear();
+        }
+        self.species_ids.clear();
+        self.species_defense_needs.clear();
+        self.species_counts.clear();
+    }
+}
+
 /// Strength of an interaction between species
 #[derive(Debug, Clone, Copy)]
 pub struct InteractionStrength {
@@ -107,48 +131,52 @@ impl Default for EvolutionPressure {
 /// Update co-evolution system
 pub fn update_coevolution_system(
     mut coevolution: ResMut<CoEvolutionSystem>,
+    mut buffers: ResMut<CoEvolutionSystemBuffers>, // Optimization: reuse buffers
     organism_query: Query<(&SpeciesId, &OrganismType, &CachedTraits), With<crate::organisms::components::Alive>>,
     time: Res<Time>,
 ) {
     let dt = time.delta_seconds();
+    
+    // Clear buffers for reuse
+    buffers.clear();
 
     // Detect and update species interactions
-    detect_species_interactions(&mut coevolution, &organism_query, dt);
+    detect_species_interactions(&mut coevolution, &mut buffers, &organism_query, dt);
 
     // Update evolved defenses based on interactions
-    update_evolved_defenses(&mut coevolution, &organism_query, dt);
+    update_evolved_defenses(&mut coevolution, &mut buffers, &organism_query, dt);
 
     // Update evolution pressure
-    update_evolution_pressure(&mut coevolution, &organism_query, dt);
+    update_evolution_pressure(&mut coevolution, &mut buffers, &organism_query, dt);
 }
 
 /// Detect species interactions based on organism traits and proximity
 fn detect_species_interactions(
     coevolution: &mut CoEvolutionSystem,
+    buffers: &mut CoEvolutionSystemBuffers, // Optimization: reuse buffers
     organism_query: &Query<(&SpeciesId, &OrganismType, &CachedTraits), With<crate::organisms::components::Alive>>,
     dt: f32,
 ) {
-    // Group organisms by species
-    let mut species_groups: HashMap<u32, Vec<(OrganismType, CachedTraits)>> = HashMap::new();
-    
+    // Group organisms by species (reuse buffer)
     for (species_id, org_type, traits) in organism_query.iter() {
-        species_groups
+        buffers.species_groups
             .entry(species_id.value())
             .or_insert_with(Vec::new)
             .push((*org_type, traits.clone()));
     }
 
-    let species_ids: Vec<u32> = species_groups.keys().copied().collect();
+    buffers.species_ids.clear();
+    buffers.species_ids.extend(buffers.species_groups.keys().copied());
 
     // Check for predator-prey relationships
-    for &predator_id in &species_ids {
-        for &prey_id in &species_ids {
+    for &predator_id in &buffers.species_ids {
+        for &prey_id in &buffers.species_ids {
             if predator_id == prey_id {
                 continue;
             }
 
-            let predator_group = &species_groups[&predator_id];
-            let prey_group = &species_groups[&prey_id];
+            let predator_group = &buffers.species_groups[&predator_id];
+            let prey_group = &buffers.species_groups[&prey_id];
 
             // Check if predator-prey relationship is likely
             if is_predator_prey_relationship(predator_group, prey_group) {
@@ -168,13 +196,13 @@ fn detect_species_interactions(
     }
 
     // Check for competitive relationships (same trophic level)
-    for i in 0..species_ids.len() {
-        for j in (i + 1)..species_ids.len() {
-            let species_a = species_ids[i];
-            let species_b = species_ids[j];
+    for i in 0..buffers.species_ids.len() {
+        for j in (i + 1)..buffers.species_ids.len() {
+            let species_a = buffers.species_ids[i];
+            let species_b = buffers.species_ids[j];
 
-            let group_a = &species_groups[&species_a];
-            let group_b = &species_groups[&species_b];
+            let group_a = &buffers.species_groups[&species_a];
+            let group_b = &buffers.species_groups[&species_b];
 
             // Check if competitive relationship is likely
             if is_competitive_relationship(group_a, group_b) {
@@ -274,16 +302,17 @@ fn is_mutualistic_relationship(
 /// Update evolved defenses based on interactions
 fn update_evolved_defenses(
     coevolution: &mut CoEvolutionSystem,
+    buffers: &mut CoEvolutionSystemBuffers, // Optimization: reuse buffers
     _organism_query: &Query<(&SpeciesId, &OrganismType, &CachedTraits), With<crate::organisms::components::Alive>>,
     dt: f32,
 ) {
-    // For each species, calculate defense needs based on interactions
-    let mut species_defense_needs: HashMap<u32, DefenseTraits> = HashMap::new();
+    // For each species, calculate defense needs based on interactions (reuse buffer)
+    buffers.species_defense_needs.clear();
 
     // Calculate predation pressure per species
     for (prey_species, _) in &coevolution.predator_prey {
         let (_, prey_id) = *prey_species;
-        let defenses = species_defense_needs
+        let defenses = buffers.species_defense_needs
             .entry(prey_id)
             .or_insert_with(DefenseTraits::default);
 
@@ -302,7 +331,7 @@ fn update_evolved_defenses(
     // Calculate parasite pressure per species
     for (parasite_species, _) in &coevolution.parasite_host {
         let (_, host_id) = *parasite_species;
-        let defenses = species_defense_needs
+        let defenses = buffers.species_defense_needs
             .entry(host_id)
             .or_insert_with(DefenseTraits::default);
 
@@ -319,9 +348,9 @@ fn update_evolved_defenses(
     }
 
     // Update species defenses (evolution happens gradually)
-    for (species_id, defenses) in species_defense_needs {
+    for (species_id, defenses) in &buffers.species_defense_needs {
         let current_defenses = coevolution.species_defenses
-            .entry(species_id)
+            .entry(*species_id)
             .or_insert_with(DefenseTraits::default);
 
         // Gradually evolve defenses toward needed levels
@@ -357,18 +386,19 @@ fn update_evolved_defenses(
 /// Update evolution pressure tracking
 fn update_evolution_pressure(
     coevolution: &mut CoEvolutionSystem,
+    buffers: &mut CoEvolutionSystemBuffers, // Optimization: reuse buffers
     organism_query: &Query<(&SpeciesId, &OrganismType, &CachedTraits), With<crate::organisms::components::Alive>>,
     _dt: f32,
 ) {
-    // Group organisms by species
-    let mut species_counts: HashMap<u32, u32> = HashMap::new();
+    // Group organisms by species (reuse buffer)
+    buffers.species_counts.clear();
     
     for (species_id, _, _) in organism_query.iter() {
-        *species_counts.entry(species_id.value()).or_insert(0) += 1;
+        *buffers.species_counts.entry(species_id.value()).or_insert(0) += 1;
     }
 
     // Calculate pressure for each species
-    for species_id in species_counts.keys() {
+    for species_id in buffers.species_counts.keys() {
         let pressure = coevolution.evolution_pressure
             .entry(*species_id)
             .or_insert_with(EvolutionPressure::default);

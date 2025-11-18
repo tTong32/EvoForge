@@ -45,17 +45,20 @@ impl SpatialHash {
         // Remove from old bucket if it exists
         if let Some(old_bucket) = self.entity_buckets.remove(&entity) {
             if let Some(bucket_vec) = self.buckets.get_mut(&old_bucket) {
-                bucket_vec.retain(|&e| e != entity);
+                // Optimized: Use position + swap_remove instead of retain
+                if let Some(pos) = bucket_vec.iter().position(|&e| e == entity) {
+                    bucket_vec.swap_remove(pos);
+                }
                 if bucket_vec.is_empty() {
                     self.buckets.remove(&old_bucket);
                 }
             }
         }
 
-        // Add to new bucket
+        // Add to new bucket (pre-allocate capacity for better performance)
         self.buckets
             .entry(bucket)
-            .or_insert_with(Vec::new)
+            .or_insert_with(|| Vec::with_capacity(8)) // Pre-allocate for typical bucket size
             .push(entity);
         self.entity_buckets.insert(entity, bucket);
     }
@@ -64,7 +67,10 @@ impl SpatialHash {
     pub fn remove(&mut self, entity: Entity) {
         if let Some(bucket) = self.entity_buckets.remove(&entity) {
             if let Some(bucket_vec) = self.buckets.get_mut(&bucket) {
-                bucket_vec.retain(|&e| e != entity);
+                // Optimized: Use position + swap_remove instead of retain
+                if let Some(pos) = bucket_vec.iter().position(|&e| e == entity) {
+                    bucket_vec.swap_remove(pos);
+                }
                 if bucket_vec.is_empty() {
                     self.buckets.remove(&bucket);
                 }
@@ -91,6 +97,28 @@ impl SpatialHash {
         }
 
         results
+    }
+
+    /// Get all entities within a radius, filling into a reusable buffer
+    /// More efficient when called multiple times per frame (avoids allocations)
+    pub fn query_radius_into(&self, position: Vec2, radius: f32, results: &mut Vec<Entity>) {
+        results.clear();
+        let center_bucket = self.world_to_bucket(position);
+        let radius_buckets = (radius / self.cell_size).ceil() as i32;
+
+        // Pre-allocate based on expected bucket count (most queries hit 4-9 buckets)
+        let expected_buckets = ((radius_buckets * 2 + 1) * (radius_buckets * 2 + 1)).min(16) as usize;
+        results.reserve(expected_buckets * 8); // Assume ~8 entities per bucket on average (increased from 4)
+
+        // Check all buckets within radius
+        for dy in -radius_buckets..=radius_buckets {
+            for dx in -radius_buckets..=radius_buckets {
+                let bucket = (center_bucket.0 + dx, center_bucket.1 + dy);
+                if let Some(entities) = self.buckets.get(&bucket) {
+                    results.extend(entities.iter().copied());
+                }
+            }
+        }
     }
 
     /// Get entities in a specific bucket

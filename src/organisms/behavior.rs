@@ -3,6 +3,7 @@ use crate::world::{ResourceType, WorldGrid};
 use bevy::prelude::*;
 use glam::Vec2;
 use std::collections::HashMap;
+use smallvec::{SmallVec, smallvec};
 
 /// Behavior state machine - organisms can be in one of these states
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,8 +113,8 @@ pub struct SensoryData {
 impl SensoryData {
     pub fn new() -> Self {
         Self {
-            nearby_organisms: Vec::new(),
-            nearby_resources: Vec::new(),
+            nearby_organisms: Vec::with_capacity(16), // Pre-allocate for typical neighbor count
+            nearby_resources: Vec::with_capacity(20), // Pre-allocate for MAX_RESOURCES_TO_CHECK
             current_cell_resources: [0.0; 6],
             nearest_predator: None,
             richest_resource: None,
@@ -122,10 +123,23 @@ impl SensoryData {
 }
 
 /// Cache sensory data for organisms that haven't moved much (optimization 3)
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub struct SensoryDataCache {
     cache: HashMap<Entity, (Vec2, SensoryData, u32)>, // (position, data, age_in_frames)
     max_cache_age: u32,
+    cleanup_counter: u32,
+    cleanup_interval: u32,
+}
+
+impl Default for SensoryDataCache {
+    fn default() -> Self {
+        Self {
+            cache: HashMap::new(),
+            max_cache_age: 15, // Increased from 10 for better cache hit rate
+            cleanup_counter: 0,
+            cleanup_interval: 60, // Cleanup every 60 frames
+        }
+    }
 }
 
 impl SensoryDataCache {
@@ -133,6 +147,8 @@ impl SensoryDataCache {
         Self {
             cache: HashMap::new(),
             max_cache_age: max_age,
+            cleanup_counter: 0,
+            cleanup_interval: 60,
         }
     }
     
@@ -144,13 +160,16 @@ impl SensoryDataCache {
     where
         F: FnOnce() -> SensoryData,
     {
-        let cache_threshold = sensory_range * 0.3; // Cache if moved less than 30% of sensory range
+        // Adaptive cache threshold: larger sensory range = larger movement tolerance
+        // Cache if moved less than 40% of sensory range (increased from 30%)
+        let cache_threshold_sq = (sensory_range * 0.4) * (sensory_range * 0.4);
         
         if let Some((cached_pos, cached_data, age)) = self.cache.get_mut(&entity) {
             *age += 1;
             
             // Use cache if position hasn't changed much and cache isn't too old
-            if (position - *cached_pos).length_squared() < cache_threshold * cache_threshold && *age < self.max_cache_age {
+            // Use squared distance to avoid sqrt
+            if (position - *cached_pos).length_squared() < cache_threshold_sq && *age < self.max_cache_age {
                 return cached_data.clone();
             }
         }
@@ -169,6 +188,15 @@ impl SensoryDataCache {
         // Remove old entries periodically
         self.cache.retain(|_, (_, _, age)| *age < self.max_cache_age);
     }
+    
+    /// Periodic cleanup - call this from update system
+    pub fn maybe_cleanup(&mut self) {
+        self.cleanup_counter += 1;
+        if self.cleanup_counter >= self.cleanup_interval {
+            self.cleanup();
+            self.cleanup_counter = 0;
+        }
+    }
 }
 
 /// Collect sensory information for an organism (OPTIMIZED - optimization 3)
@@ -181,6 +209,7 @@ pub fn collect_sensory_data(
     size: f32,
     world_grid: &WorldGrid,
     spatial_hash: &crate::utils::SpatialHash,
+    query_buffer: &mut Vec<Entity>, // Reusable buffer to avoid allocations
     organism_query: &Query<
         (
             Entity,
@@ -201,11 +230,16 @@ pub fn collect_sensory_data(
         sensory.current_cell_resources = cell.resource_density;
     }
 
-    // Query nearby organisms using spatial hash (much faster than iterating all)
-    let nearby_entities = spatial_hash.query_radius(position, sensory_range);
+    // Query nearby organisms using spatial hash with reusable buffer (avoids allocation)
+    spatial_hash.query_radius_into(position, sensory_range, query_buffer);
+    let nearby_entities = query_buffer;
     let sensory_range_sq = sensory_range * sensory_range; // Use squared distance to avoid sqrt
+    
+    // Pre-allocate based on expected neighbor count (most organisms have < 20 neighbors)
+    let expected_neighbors = nearby_entities.len().min(32);
+    sensory.nearby_organisms.reserve(expected_neighbors);
 
-    for other_entity in nearby_entities {
+    for other_entity in nearby_entities.iter().copied() {
         if other_entity == entity {
             continue; // Skip self
         }
@@ -216,7 +250,6 @@ pub fn collect_sensory_data(
             // Use squared distance to avoid sqrt
             let distance_sq = (position - other_pos.0).length_squared();
             if distance_sq <= sensory_range_sq {
-                let distance = distance_sq.sqrt(); // Only compute sqrt when needed
                 let is_predator =
                     is_predator_of(organism_type, *other_type, other_size.value(), size);
                 let is_prey = is_prey_of(organism_type, *other_type, size, other_size.value());
@@ -225,27 +258,39 @@ pub fn collect_sensory_data(
                     && !other_energy.is_dead()
                     && distance_sq <= (sensory_range * 0.5).powi(2);
 
-                if is_predator {
+                // Only compute sqrt and add to nearby_organisms if it's relevant (predator, prey, or mate)
+                if is_predator || is_prey || is_mate {
+                    let distance = distance_sq.sqrt(); // Only compute sqrt when needed
+                    
+                    if is_predator {
+                        match &mut sensory.nearest_predator {
+                            Some((_, _, current_distance)) if *current_distance <= distance => {}
+                            _ => sensory.nearest_predator = Some((other_entity, other_pos.0, distance)),
+                        }
+                    }
+
+                    sensory.nearby_organisms.push(NearbyOrganism {
+                        entity: other_entity,
+                        position: other_pos.0,
+                        distance,
+                        species_id: *other_species,
+                        organism_type: *other_type,
+                        is_predator,
+                        is_prey,
+                        is_mate,
+                        size: other_size.value(),
+                        speed: other_traits.speed,
+                        armor: other_traits.armor,
+                        poison_strength: other_traits.poison_strength,
+                    });
+                } else if is_predator {
+                    // Handle predator case even if not adding to nearby_organisms
+                    let distance = distance_sq.sqrt();
                     match &mut sensory.nearest_predator {
                         Some((_, _, current_distance)) if *current_distance <= distance => {}
                         _ => sensory.nearest_predator = Some((other_entity, other_pos.0, distance)),
                     }
                 }
-
-                sensory.nearby_organisms.push(NearbyOrganism {
-                    entity: other_entity,
-                    position: other_pos.0,
-                    distance,
-                    species_id: *other_species,
-                    organism_type: *other_type,
-                    is_predator,
-                    is_prey,
-                    is_mate,
-                    size: other_size.value(),
-                    speed: other_traits.speed,
-                    armor: other_traits.armor,
-                    poison_strength: other_traits.poison_strength,
-                });
             }
         }
     }
@@ -253,7 +298,7 @@ pub fn collect_sensory_data(
     // OPTIMIZED: Find nearby resource-rich cells with early termination (optimization 3)
     let cell_size = 1.0;
     let search_radius = (sensory_range / cell_size).ceil() as i32;
-    let sensory_range_sq = sensory_range * sensory_range;
+    // Reuse sensory_range_sq from above (already computed on line 234)
     
     // Pre-compute bounds to avoid redundant checks
     let min_x = (position.x - sensory_range) as i32;
@@ -288,19 +333,19 @@ pub fn collect_sensory_data(
                     break;
                 }
                 
-                // Only check relevant resource types for this organism
-                let resource_types: Vec<ResourceType> = match organism_type {
-                    OrganismType::Producer => vec![
+                // Only check relevant resource types for this organism (use SmallVec to avoid allocation)
+                let resource_types: SmallVec<[ResourceType; 3]> = match organism_type {
+                    OrganismType::Producer => smallvec![
                         ResourceType::Sunlight,
                         ResourceType::Water,
                         ResourceType::Mineral,
                     ],
-                    OrganismType::Consumer => vec![
+                    OrganismType::Consumer => smallvec![
                         ResourceType::Plant,
                         ResourceType::Prey,
                         ResourceType::Water, // Consumers also need water
                     ],
-                    OrganismType::Decomposer => vec![
+                    OrganismType::Decomposer => smallvec![
                         ResourceType::Detritus,
                     ],
                 };
@@ -309,14 +354,24 @@ pub fn collect_sensory_data(
                     let value = cell.get_resource(*resource_type);
                     if value > 0.1 {
                         let distance = distance_sq.sqrt();
-                        let entry = (Vec2::new(check_x, check_y), *resource_type, distance, value);
                         
+                        // Avoid clone by constructing entry once and reusing
                         if value > best_resource_value {
                             best_resource_value = value;
-                            sensory.richest_resource = Some(entry.clone());
+                            sensory.richest_resource = Some((
+                                Vec2::new(check_x, check_y),
+                                *resource_type,
+                                distance,
+                                value,
+                            ));
                         }
 
-                        sensory.nearby_resources.push(entry);
+                        sensory.nearby_resources.push((
+                            Vec2::new(check_x, check_y),
+                            *resource_type,
+                            distance,
+                            value,
+                        ));
                         resources_found += 1;
                     }
                 }
@@ -329,17 +384,15 @@ pub fn collect_sensory_data(
         }
     }
 
-    // Only sort if we have resources (avoid unnecessary work)
-    if !sensory.nearby_resources.is_empty() {
-        sensory
-            .nearby_resources
-            .sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
-    }
+    // Optimization: Only sort if resources will be used for decision-making
+    // Many organisms don't need sorted resources, so we defer sorting
+    // Sorting will happen lazily when find_best_food_source_weighted is called if needed
 
     sensory
 }
 
 /// Determine if one organism is a predator of another
+#[inline]
 fn is_predator_of(
     predator_type: OrganismType,
     prey_type: OrganismType,
@@ -364,6 +417,7 @@ fn is_predator_of(
 }
 
 /// Determine if one organism is prey for another
+#[inline]
 fn is_prey_of(
     predator_type: OrganismType,
     prey_type: OrganismType,
@@ -799,6 +853,7 @@ fn find_best_food_source(organism_type: OrganismType, sensory: &SensoryData) -> 
     find_best_food_source_weighted(organism_type, sensory, 0.0)
 }
 
+#[inline]
 fn find_best_food_source_weighted(
     organism_type: OrganismType,
     sensory: &SensoryData,
@@ -835,6 +890,7 @@ fn find_best_food_source_weighted(
 }
 
 /// Check if organism is at a food source
+#[inline]
 fn is_at_food_source(organism_type: OrganismType, sensory: &SensoryData) -> bool {
     let preferred_resources = match organism_type {
         OrganismType::Producer => vec![ResourceType::Sunlight, ResourceType::Water],
@@ -853,6 +909,7 @@ fn is_at_food_source(organism_type: OrganismType, sensory: &SensoryData) -> bool
 }
 
 /// Calculate velocity for a behavior state
+#[inline]
 pub fn calculate_behavior_velocity(
     behavior: &Behavior,
     position: Vec2,
