@@ -16,6 +16,9 @@ use std::collections::HashSet;
 pub use cell::Cell;
 pub use cell::{ResourceType, TerrainType};
 pub use chunk::Chunk;
+pub use chunk::CHUNK_SIZE;
+pub use chunk::CHUNK_WORLD_SIZE;
+pub use chunk::CELL_SIZE;
 pub use climate::ClimateState;
 pub use grid::WorldGrid;
 pub use resources::*;
@@ -25,6 +28,20 @@ pub use plants::*;
 
 // Re-export specific types for visualization
 pub use events::{DisasterEvents, Disaster, DisasterType};
+
+/// World size configuration
+/// Maximum radius in chunks from origin (0,0)
+/// Default: 100 chunks = ~6,400 world units radius
+pub const MAX_WORLD_RADIUS_CHUNKS: i32 = 100;
+
+/// Distance in chunks beyond organism activity before unloading chunks
+/// Chunks further than this from any organism will be unloaded
+/// Default: 50 chunks = ~3,200 world units
+pub const CHUNK_UNLOAD_DISTANCE: i32 = 50;
+
+/// Frequency of chunk unloading (every N frames)
+/// Higher = less frequent but more efficient
+pub const CHUNK_UNLOAD_FREQUENCY: u32 = 60; // Every 60 frames (~1 second at 60 FPS)
 
 /// Track which chunks/cells need updates (optimization 2)
 #[derive(Resource, Default)]
@@ -66,6 +83,35 @@ impl DirtyChunks {
     }
 }
 
+/// Resource to track world bounds and chunk unloading state
+#[derive(Resource, Default)]
+pub struct WorldBounds {
+    /// Frame counter for periodic chunk unloading
+    unload_counter: u32,
+    /// Last known bounds of organism activity
+    activity_bounds: Option<(i32, i32, i32, i32)>, // (min_x, max_x, min_y, max_y)
+}
+
+impl WorldBounds {
+    pub fn update_activity_bounds(&mut self, min_x: i32, max_x: i32, min_y: i32, max_y: i32) {
+        self.activity_bounds = Some((min_x, max_x, min_y, max_y));
+    }
+    
+    pub fn should_unload_chunks(&mut self) -> bool {
+        self.unload_counter += 1;
+        if self.unload_counter >= CHUNK_UNLOAD_FREQUENCY {
+            self.unload_counter = 0;
+            true
+        } else {
+            false
+        }
+    }
+    
+    pub fn activity_bounds(&self) -> Option<(i32, i32, i32, i32)> {
+        self.activity_bounds
+    }
+}
+
 pub struct WorldPlugin;
 
 impl Plugin for WorldPlugin {
@@ -73,6 +119,7 @@ impl Plugin for WorldPlugin {
         app.init_resource::<WorldGrid>()
             .init_resource::<ClimateState>()
             .init_resource::<DirtyChunks>()
+            .init_resource::<WorldBounds>()
             .init_resource::<events::DisasterEvents>() // Step 9: Major disasters
             .add_systems(Startup, initialize_world)
             .add_systems(
@@ -80,6 +127,7 @@ impl Plugin for WorldPlugin {
                 (
                     update_climate,
                     mark_active_chunks,
+                    unload_distant_chunks, // Unload chunks far from organisms
                     update_chunks,
                     regenerate_and_decay_resources,
                     flow_resources,
@@ -122,25 +170,31 @@ fn update_climate(mut climate: ResMut<ClimateState>, time: Res<Time>) {
 }
 
 /// Mark chunks/cells as active based on organism positions
+/// OPTIMIZED: Uses spatial hash - O(buckets_with_organisms × range²) instead of O(organisms × range²)
 fn mark_active_chunks(
     mut dirty_chunks: ResMut<DirtyChunks>,
-    organism_query: Query<&crate::organisms::Position, With<crate::organisms::Alive>>,
+    spatial_hash: Res<crate::utils::SpatialHashGrid>,
 ) {
-    const ACTIVE_RANGE: f32 = 10.0; // Cells within this range of organisms are "active"
-    dirty_chunks.active_cells.clear(); // Refresh active cells each frame
+    const ACTIVE_RANGE: f32 = 10.0;
+    dirty_chunks.active_cells.clear();
     
-    for position in organism_query.iter() {
-        let world_x = position.x();
-        let world_y = position.y();
+    // Get all buckets that contain organisms
+    let organism_buckets = spatial_hash.organisms.get_active_buckets();
+    
+    let cell_size = spatial_hash.organisms.cell_size();
+    let bucket_radius = (ACTIVE_RANGE / cell_size).ceil() as i32;
+    
+    // For each bucket with organisms, mark all cells within ACTIVE_RANGE
+    for (bucket_x, bucket_y) in organism_buckets {
+        // Convert bucket coordinates to world position (center of bucket)
+        let bucket_world_x = (bucket_x as f32 + 0.5) * cell_size;
+        let bucket_world_y = (bucket_y as f32 + 0.5) * cell_size;
         
-        // Find all cells within active range
-        let cell_size = 1.0;
-        let range_cells = (ACTIVE_RANGE / cell_size).ceil() as i32;
-        
-        for dy in -range_cells..=range_cells {
-            for dx in -range_cells..=range_cells {
-                let check_x = world_x + (dx as f32 * cell_size);
-                let check_y = world_y + (dy as f32 * cell_size);
+        // Mark all cells within ACTIVE_RANGE of this bucket
+        for dy in -bucket_radius..=bucket_radius {
+            for dx in -bucket_radius..=bucket_radius {
+                let check_x = bucket_world_x + (dx as f32 * cell_size);
+                let check_y = bucket_world_y + (dy as f32 * cell_size);
                 let distance = Vec2::new(dx as f32, dy as f32).length() * cell_size;
                 
                 if distance <= ACTIVE_RANGE {
@@ -153,6 +207,72 @@ fn mark_active_chunks(
     }
     
     dirty_chunks.decay_active_cells();
+}
+
+/// Unload chunks that are far from organism activity
+/// Runs periodically to prevent memory bloat from organisms exploring
+fn unload_distant_chunks(
+    mut world_grid: ResMut<WorldGrid>,
+    mut world_bounds: ResMut<WorldBounds>,
+    organism_query: Query<&crate::organisms::Position, With<crate::organisms::Alive>>,
+) {
+    // Only run periodically
+    if !world_bounds.should_unload_chunks() {
+        return;
+    }
+    
+    // Find bounds of organism activity
+    let mut min_chunk_x = i32::MAX;
+    let mut max_chunk_x = i32::MIN;
+    let mut min_chunk_y = i32::MAX;
+    let mut max_chunk_y = i32::MIN;
+    let mut has_organisms = false;
+    
+    for position in organism_query.iter() {
+        has_organisms = true;
+        let (chunk_x, chunk_y) = Chunk::world_to_chunk(position.x(), position.y());
+        min_chunk_x = min_chunk_x.min(chunk_x);
+        max_chunk_x = max_chunk_x.max(chunk_x);
+        min_chunk_y = min_chunk_y.min(chunk_y);
+        max_chunk_y = max_chunk_y.max(chunk_y);
+    }
+    
+    // If no organisms, don't unload anything (might be startup)
+    if !has_organisms {
+        return;
+    }
+    
+    // Update activity bounds
+    world_bounds.update_activity_bounds(min_chunk_x, max_chunk_x, min_chunk_y, max_chunk_y);
+    
+    // Expand bounds by unload distance
+    let unload_min_x = min_chunk_x - CHUNK_UNLOAD_DISTANCE;
+    let unload_max_x = max_chunk_x + CHUNK_UNLOAD_DISTANCE;
+    let unload_min_y = min_chunk_y - CHUNK_UNLOAD_DISTANCE;
+    let unload_max_y = max_chunk_y + CHUNK_UNLOAD_DISTANCE;
+    
+    // Find chunks to unload
+    let chunks_to_remove: Vec<_> = world_grid
+        .get_chunk_coords()
+        .into_iter()
+        .filter(|(chunk_x, chunk_y)| {
+            *chunk_x < unload_min_x
+                || *chunk_x > unload_max_x
+                || *chunk_y < unload_min_y
+                || *chunk_y > unload_max_y
+        })
+        .collect();
+    
+    let removed_count = chunks_to_remove.len();
+    
+    // Remove distant chunks
+    for (chunk_x, chunk_y) in chunks_to_remove {
+        world_grid.remove_chunk(chunk_x, chunk_y);
+    }
+    
+    if removed_count > 0 {
+        info!("Unloaded {} distant chunks. Active chunks: {}", removed_count, world_grid.chunk_count());
+    }
 }
 
 /// Update all chunks: climate and resource regeneration/decay
@@ -181,8 +301,8 @@ fn update_chunks(
                             if dirty_chunks.should_update_cell(chunk_x, chunk_y, x, y) {
                                 if let Some(cell) = chunk.get_cell(x, y) {
                                     let world_pos = Vec2::new(
-                                        chunk_x as f32 * crate::world::chunk::CHUNK_SIZE as f32 + x as f32,
-                                        chunk_y as f32 * crate::world::chunk::CHUNK_SIZE as f32 + y as f32,
+                                        chunk_x as f32 * crate::world::chunk::CHUNK_WORLD_SIZE + x as f32 * crate::world::chunk::CELL_SIZE,
+                                        chunk_y as f32 * crate::world::chunk::CHUNK_WORLD_SIZE + y as f32 * crate::world::chunk::CELL_SIZE,
                                     );
                                     // Clone cell data for parallel processing
                                     let cell_data = (chunk_x, chunk_y, x, y, world_pos, cell.clone());

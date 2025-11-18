@@ -102,18 +102,14 @@ pub fn collect_ecosystem_stats(
             .map(|t| t.species_count())
             .unwrap_or(0);
         
-        let producers = stats.population_by_type.get(&OrganismType::Producer).copied().unwrap_or(0);
         let consumers = stats.population_by_type.get(&OrganismType::Consumer).copied().unwrap_or(0);
-        let decomposers = stats.population_by_type.get(&OrganismType::Decomposer).copied().unwrap_or(0);
 
         info!(
-            "[ECOSYSTEM] Tick {} | Population: {} | Species: {} | Producers: {} | Consumers: {} | Decomposers: {}",
+            "[ECOSYSTEM] Tick {} | Population: {} | Species: {} | Consumers: {}",
             stats.tick_counter,
             stats.total_population,
             species_count,
-            producers,
             consumers,
-            decomposers
         );
     }
 }

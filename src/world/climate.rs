@@ -31,7 +31,7 @@ impl Default for ClimateState {
             season: 0.0,
             time: 0,
             noise_phase: 0.0,
-            event_cooldown: 120.0,
+            event_cooldown: 5.37, // 120.0 / 22.34 (scaled for 600-tick lifetime)
             events: Vec::new(),
             regional_seed: fastrand::u64(..),
         }
@@ -43,8 +43,8 @@ impl ClimateState {
     pub fn update(&mut self, _dt: f32) {
         self.time += 1;
 
-        // Seasonal cycle (1000 ticks = 1 year)
-        let season_period = 1000.0;
+        // Seasonal cycle (44.8 ticks = 1 year, scaled for 600-tick lifetime)
+        let season_period = 44.8; // 1000.0 / 22.34
         self.season = ((self.time as f32) / season_period) % 1.0;
 
         // Seasonal temperature variation
@@ -57,13 +57,13 @@ impl ClimateState {
             ((self.season * 2.0 * std::f32::consts::PI) + std::f32::consts::PI).sin() * 0.15;
         self.base_humidity = 0.5 + seasonal_humidity;
 
-        // Long-term climate drift
-        let drift_rate = 0.0001;
+        // Long-term climate drift (scaled 22.34x faster for 600-tick lifetime)
+        let drift_rate = 0.00223; // 0.0001 × 22.34
         self.base_temperature += (fastrand::f32() - 0.5) * drift_rate;
         self.base_temperature = self.base_temperature.clamp(0.2, 0.8);
 
         let dt = 1.0f32;
-        self.noise_phase += 0.015 * dt;
+        self.noise_phase += 0.335 * dt; // 0.015 × 22.34 (scaled for 600-tick lifetime)
 
         // Decay stochastic events
         for event in &mut self.events {
@@ -77,7 +77,7 @@ impl ClimateState {
             if fastrand::f32() < 0.02 {
                 self.spawn_event();
             }
-            self.event_cooldown = fastrand::f32() * 300.0 + 120.0;
+            self.event_cooldown = fastrand::f32() * 13.4 + 5.37; // Scaled for 600-tick lifetime
         }
     }
 
@@ -152,10 +152,10 @@ impl ClimateState {
         let center = Vec2::new(rng.f32() * 400.0 - 200.0, rng.f32() * 400.0 - 200.0);
         let radius = rng.f32() * 120.0 + 60.0;
         let (temperature_delta, humidity_delta, duration) = match rng.u8(..4) {
-            0 => (0.08, -0.12, 180.0), // heatwave
-            1 => (-0.1, 0.15, 200.0),  // cold rainstorm
-            2 => (0.0, -0.2, 220.0),   // drought
-            _ => (0.05, 0.18, 160.0),  // tropical storm
+            0 => (0.08, -0.12, 8.06),  // heatwave (180.0 / 22.34)
+            1 => (-0.1, 0.15, 8.95),   // cold rainstorm (200.0 / 22.34)
+            2 => (0.0, -0.2, 9.85),    // drought (220.0 / 22.34)
+            _ => (0.05, 0.18, 7.16),   // tropical storm (160.0 / 22.34)
         };
 
         self.events.push(ClimateEvent {

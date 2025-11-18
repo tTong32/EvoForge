@@ -21,7 +21,7 @@ impl Default for DisasterEvents {
     fn default() -> Self {
         Self {
             active_disasters: Vec::new(),
-            spawn_cooldown: 500.0, // Initial cooldown (longer than climate events)
+            spawn_cooldown: 22.4, // 500.0 / 22.34 (scaled for 600-tick lifetime)
             total_disasters: 0,
         }
     }
@@ -125,7 +125,7 @@ pub fn update_disaster_events(
             spawn_random_disaster(&mut disaster_events, &world_grid);
         }
         // Reset cooldown (300-1000 seconds)
-        disaster_events.spawn_cooldown = fastrand::f32() * 700.0 + 300.0;
+        disaster_events.spawn_cooldown = fastrand::f32() * 31.3 + 13.4; // Scaled for 600-tick lifetime
     }
 }
 
@@ -165,13 +165,13 @@ fn apply_volcano_effects(
     for chunk_x in min_chunk_x..=max_chunk_x {
         for chunk_y in min_chunk_y..=max_chunk_y {
             if let Some(chunk) = world_grid.get_chunk_mut(chunk_x, chunk_y) {
-                use crate::world::chunk::CHUNK_SIZE;
+                use crate::world::chunk::{CHUNK_SIZE, CHUNK_WORLD_SIZE, CELL_SIZE};
                 
                 for y in 0..CHUNK_SIZE {
                     for x in 0..CHUNK_SIZE {
                         let world_pos = Vec2::new(
-                            chunk_x as f32 * CHUNK_SIZE as f32 + x as f32,
-                            chunk_y as f32 * CHUNK_SIZE as f32 + y as f32,
+                            chunk_x as f32 * CHUNK_WORLD_SIZE + x as f32 * CELL_SIZE,
+                            chunk_y as f32 * CHUNK_WORLD_SIZE + y as f32 * CELL_SIZE,
                         );
 
                         let influence = disaster.influence_at(world_pos);
@@ -221,13 +221,13 @@ fn apply_meteor_impact(
     for chunk_x in min_chunk_x..=max_chunk_x {
         for chunk_y in min_chunk_y..=max_chunk_y {
             if let Some(chunk) = world_grid.get_chunk_mut(chunk_x, chunk_y) {
-                use crate::world::chunk::CHUNK_SIZE;
+                use crate::world::chunk::{CHUNK_SIZE, CHUNK_WORLD_SIZE, CELL_SIZE};
                 
                 for y in 0..CHUNK_SIZE {
                     for x in 0..CHUNK_SIZE {
                         let world_pos = Vec2::new(
-                            chunk_x as f32 * CHUNK_SIZE as f32 + x as f32,
-                            chunk_y as f32 * CHUNK_SIZE as f32 + y as f32,
+                            chunk_x as f32 * CHUNK_WORLD_SIZE + x as f32 * CELL_SIZE,
+                            chunk_y as f32 * CHUNK_WORLD_SIZE + y as f32 * CELL_SIZE,
                         );
 
                         let influence = disaster.influence_at(world_pos);
@@ -272,13 +272,13 @@ fn apply_flood_effects(
     for chunk_x in min_chunk_x..=max_chunk_x {
         for chunk_y in min_chunk_y..=max_chunk_y {
             if let Some(chunk) = world_grid.get_chunk_mut(chunk_x, chunk_y) {
-                use crate::world::chunk::CHUNK_SIZE;
+                use crate::world::chunk::{CHUNK_SIZE, CHUNK_WORLD_SIZE, CELL_SIZE};
                 
                 for y in 0..CHUNK_SIZE {
                     for x in 0..CHUNK_SIZE {
                         let world_pos = Vec2::new(
-                            chunk_x as f32 * CHUNK_SIZE as f32 + x as f32,
-                            chunk_y as f32 * CHUNK_SIZE as f32 + y as f32,
+                            chunk_x as f32 * CHUNK_WORLD_SIZE + x as f32 * CELL_SIZE,
+                            chunk_y as f32 * CHUNK_WORLD_SIZE + y as f32 * CELL_SIZE,
                         );
 
                         let influence = disaster.influence_at(world_pos);
@@ -318,8 +318,8 @@ fn spawn_random_disaster(
 
     let (chunk_x, chunk_y) = chunk_coords[fastrand::usize(..chunk_coords.len())];
     let center = Vec2::new(
-        (chunk_x as f32 + fastrand::f32()) * crate::world::chunk::CHUNK_SIZE as f32,
-        (chunk_y as f32 + fastrand::f32()) * crate::world::chunk::CHUNK_SIZE as f32,
+        chunk_x as f32 * crate::world::chunk::CHUNK_WORLD_SIZE + fastrand::f32() * crate::world::chunk::CHUNK_WORLD_SIZE,
+        chunk_y as f32 * crate::world::chunk::CHUNK_WORLD_SIZE + fastrand::f32() * crate::world::chunk::CHUNK_WORLD_SIZE,
     );
 
     // Choose disaster type
@@ -332,10 +332,10 @@ fn spawn_random_disaster(
 
     // Set parameters based on type
     let (radius, intensity, duration) = match disaster_type {
-        DisasterType::Volcano => (80.0 + fastrand::f32() * 40.0, 0.7 + fastrand::f32() * 0.3, 300.0),
+        DisasterType::Volcano => (80.0 + fastrand::f32() * 40.0, 0.7 + fastrand::f32() * 0.3, 13.4), // 300.0 / 22.34
         DisasterType::Meteor => (30.0 + fastrand::f32() * 20.0, 0.8 + fastrand::f32() * 0.2, 1.0), // Instant
-        DisasterType::Flood => (60.0 + fastrand::f32() * 40.0, 0.6 + fastrand::f32() * 0.4, 200.0),
-        DisasterType::Drought => (100.0 + fastrand::f32() * 50.0, 0.5 + fastrand::f32() * 0.5, 400.0),
+        DisasterType::Flood => (60.0 + fastrand::f32() * 40.0, 0.6 + fastrand::f32() * 0.4, 8.95), // 200.0 / 22.34
+        DisasterType::Drought => (100.0 + fastrand::f32() * 50.0, 0.5 + fastrand::f32() * 0.5, 17.9), // 400.0 / 22.34
     };
 
     let disaster_id = disaster_events.total_disasters;
@@ -364,13 +364,13 @@ fn apply_drought_effects(
     for chunk_x in min_chunk_x..=max_chunk_x {
         for chunk_y in min_chunk_y..=max_chunk_y {
             if let Some(chunk) = world_grid.get_chunk_mut(chunk_x, chunk_y) {
-                use crate::world::chunk::CHUNK_SIZE;
+                use crate::world::chunk::{CHUNK_SIZE, CHUNK_WORLD_SIZE, CELL_SIZE};
                 
                 for y in 0..CHUNK_SIZE {
                     for x in 0..CHUNK_SIZE {
                         let world_pos = Vec2::new(
-                            chunk_x as f32 * CHUNK_SIZE as f32 + x as f32,
-                            chunk_y as f32 * CHUNK_SIZE as f32 + y as f32,
+                            chunk_x as f32 * CHUNK_WORLD_SIZE + x as f32 * CELL_SIZE,
+                            chunk_y as f32 * CHUNK_WORLD_SIZE + y as f32 * CELL_SIZE,
                         );
 
                         let influence = disaster.influence_at(world_pos);

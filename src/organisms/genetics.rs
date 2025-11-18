@@ -184,13 +184,14 @@ pub mod traits {
     pub const RESOURCE_SELECTIVITY: usize = 27;
     pub const MIGRATION_DRIVE: usize = 28;
     // Phase 2+: additional predation/learning/offspring/defense genes (reuse indices where possible)
-    pub const CONSUMPTION_RATE: usize = 29;
-    pub const ATTACK_STRENGTH: usize = 30;
-    pub const ARMOR_GENE: usize = 31;
-    pub const POISON_GENE: usize = 32;
-    pub const FLEE_SPEED_GENE: usize = 33;
-    pub const ENDURANCE_GENE: usize = 34;
-    pub const HUNTING_STRATEGY_GENE: usize = 35;
+    pub const PLANT_CONSUMPTION_RATE: usize = 29;
+    pub const MEAT_CONSUMPTION_RATE: usize = 30;
+    pub const ATTACK_STRENGTH: usize = 31;
+    pub const ARMOR_GENE: usize = 32;
+    pub const POISON_GENE: usize = 33;
+    pub const FLEE_SPEED_GENE: usize = 34;
+    pub const ENDURANCE_GENE: usize = 35;
+    pub const HUNTING_STRATEGY_GENE: usize = 36;
 
     /// Express speed trait (0.5 to 20.0 units/sec) using multiple genes.
     pub fn express_speed(genome: &Genome) -> f32 {
@@ -330,6 +331,8 @@ pub mod traits {
                 (SPEED_FAST_TWITCH, 0.4),
                 (SENSORY_FOCUS, 0.2),
                 (SOCIAL_SENSITIVITY, -0.6),
+                (PLANT_CONSUMPTION_RATE, -0.1),
+                (MEAT_CONSUMPTION_RATE, 0.25),
             ],
             0.0,
             0.0,
@@ -375,6 +378,8 @@ pub mod traits {
                 (FORAGING_BIAS, 1.1),
                 (METABOLISM_RATE, 0.4),
                 (RESOURCE_SELECTIVITY, -0.3),
+                (PLANT_CONSUMPTION_RATE, 0.3),
+                (MEAT_CONSUMPTION_RATE, -0.1),
             ],
             0.0,
             0.0,
@@ -477,13 +482,29 @@ pub mod traits {
     }
 
     /// Express consumption rate trait (fraction of plant/prey that can be eaten per second).
-    pub fn express_consumption_rate(genome: &Genome) -> f32 {
+    pub fn express_plant_consumption_rate(genome: &Genome) -> f32 {
         express_with_weights(
             genome,
             &[
-                (CONSUMPTION_RATE, 1.0),
-                (SIZE, 0.4),
-                (METABOLISM_RATE, 0.3),
+                (PLANT_CONSUMPTION_RATE, 1.0),
+                (SIZE, 0.5),
+                (METABOLISM_RATE, -0.3),
+                (AGGRESSION, -0.4),
+            ],
+            0.0,
+            0.02,
+            0.4,
+        )
+    }
+
+    pub fn express_meat_consumption_rate(genome: &Genome) -> f32 {
+        express_with_weights(
+            genome,
+            &[
+                (MEAT_CONSUMPTION_RATE, 1.0),
+                (ATTACK_STRENGTH, 0.4),
+                (METABOLISM_RATE, -0.3),
+                (AGGRESSION, 0.5),
             ],
             0.0,
             0.02,
@@ -710,8 +731,8 @@ pub mod traits {
             genome,
             &[(REPRODUCTIVE_INVESTMENT, 1.0), (DEVELOPMENTAL_PLASTICITY, 0.6)],
             0.0,
-            30.0,
-            300.0,
+            1.34,  // 30.0 / 22.34 (scaled for 600-tick lifetime)
+            13.4,  // 300.0 / 22.34
         )
     }
 
@@ -720,8 +741,8 @@ pub mod traits {
             genome,
             &[(DEVELOPMENTAL_PLASTICITY, 1.0), (SIZE, 0.5)],
             0.0,
-            50.0,
-            400.0,
+            2.24,  // 50.0 / 22.34 (scaled for 600-tick lifetime)
+            17.9,  // 400.0 / 22.34
         )
     }
 
@@ -740,8 +761,8 @@ pub mod traits {
             genome,
             &[(DEVELOPMENTAL_PLASTICITY, 1.0), (METABOLISM_RATE, 0.5)],
             0.0,
-            0.01,
-            0.1,
+            0.223, // 0.01 × 22.34 (scaled for 600-tick lifetime - faster growth)
+            2.23,  // 0.1 × 22.34
         )
     }
 
@@ -750,8 +771,8 @@ pub mod traits {
             genome,
             &[(DEVELOPMENTAL_PLASTICITY, 1.0), (METABOLIC_FLEXIBILITY, 0.5)],
             0.0,
-            0.02,
-            0.2,
+            0.447, // 0.02 × 22.34 (scaled for 600-tick lifetime - faster growth)
+            4.47,  // 0.2 × 22.34
         )
     }
 

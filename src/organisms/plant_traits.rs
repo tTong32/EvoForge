@@ -38,7 +38,7 @@ impl PlantTraits {
             root_depth: animal_traits::express_size(genome).sqrt().clamp(0.1, 3.0),
             lifespan: animal_traits::express_max_energy(genome)
                 .mul_add(0.002, 5.0)
-                .clamp(10.0, 500.0),
+                .clamp(0.45, 22.4), // 10.0/22.34 to 500.0/22.34 (scaled for 600-tick lifetime)
         }
     }
 }

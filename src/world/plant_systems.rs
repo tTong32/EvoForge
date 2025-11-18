@@ -157,10 +157,10 @@ pub fn plant_spread_system(mut world_grid: ResMut<WorldGrid>, time: Res<Time>) {
                             continue;
                         }
 
-                        let world_x = chunk_x as f32 * crate::world::chunk::CHUNK_SIZE as f32
-                            + x as f32;
-                        let world_y = chunk_y as f32 * crate::world::chunk::CHUNK_SIZE as f32
-                            + y as f32;
+                        let world_x = chunk_x as f32 * crate::world::chunk::CHUNK_WORLD_SIZE
+                            + x as f32 * crate::world::chunk::CELL_SIZE;
+                        let world_y = chunk_y as f32 * crate::world::chunk::CHUNK_WORLD_SIZE
+                            + y as f32 * crate::world::chunk::CELL_SIZE;
 
                         for species in cell.plant_community.iter() {
                             let traits = PlantTraits::from_genome(&species.genome);

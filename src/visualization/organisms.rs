@@ -216,9 +216,7 @@ fn get_organism_color(
 ) -> Color {
     // Base color based on organism type
     let (r_base, g_base, b_base) = match organism_type {
-        OrganismType::Producer => (0.2, 0.8, 0.2),   // Green
         OrganismType::Consumer => (0.8, 0.2, 0.2),   // Red
-        OrganismType::Decomposer => (0.6, 0.4, 0.8), // Purple
     };
 
     // Modulate by energy level (darker = lower energy)

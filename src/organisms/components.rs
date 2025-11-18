@@ -153,9 +153,7 @@ pub struct KilledByPredation;
 /// Organism type (for future behavior differentiation)
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OrganismType {
-    Producer,   // Plants, algae - generate energy from resources
     Consumer,   // Animals - consume other organisms/resources
-    Decomposer, // Fungi, bacteria - consume detritus
 }
 
 /// High-level hunting strategy for consumers.
@@ -208,7 +206,8 @@ pub struct CachedTraits {
     pub threat_decay_rate: f32,
     pub resource_selectivity: f32,
     // Predation & learning related traits (Phase 2)
-    pub consumption_rate: f32,
+    pub plant_consumption_rate: f32,
+    pub meat_consumption_rate: f32,
     pub attack_strength: f32,
     pub coordination: f32,
     pub forms_packs: bool,
@@ -331,7 +330,8 @@ impl CachedTraits {
             hunger_memory_rate: traits::express_hunger_memory_rate(genome),
             threat_decay_rate: traits::express_threat_decay_rate(genome),
             resource_selectivity: traits::express_resource_selectivity(genome),
-            consumption_rate: traits::express_consumption_rate(genome),
+            plant_consumption_rate: traits::express_plant_consumption_rate(genome),
+            meat_consumption_rate: traits::express_meat_consumption_rate(genome),
             attack_strength: traits::express_attack_strength(genome),
             coordination: traits::express_coordination(genome),
             forms_packs: traits::express_forms_packs(genome),

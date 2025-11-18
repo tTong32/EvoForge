@@ -107,7 +107,7 @@ impl SpatialHash {
         let radius_buckets = (radius / self.cell_size).ceil() as i32;
 
         // Pre-allocate based on expected bucket count (most queries hit 4-9 buckets)
-        let expected_buckets = ((radius_buckets * 2 + 1) * (radius_buckets * 2 + 1)).min(16) as usize;
+        let expected_buckets = ((radius_buckets * 2 + 1) * (radius_buckets * 2 + 1)).min(crate::world::CHUNK_SIZE as i32 * 2 + 1) as usize;
         results.reserve(expected_buckets * 8); // Assume ~8 entities per bucket on average (increased from 4)
 
         // Check all buckets within radius
@@ -126,6 +126,18 @@ impl SpatialHash {
         self.buckets.get(&bucket)
     }
 
+    pub fn get_active_buckets(&self) -> Vec<(i32, i32)> {
+        self.buckets
+            .iter()
+            .filter(|(_, entities)| !entities.is_empty())
+            .map(|(coord, _)| *coord)
+            .collect()
+    }
+
+    pub fn cell_size(&self) -> f32 {
+        self.cell_size
+    }
+    
     /// Get the number of buckets currently in use
     pub fn bucket_count(&self) -> usize {
         self.buckets.len()
@@ -144,7 +156,7 @@ impl Default for SpatialHashGrid {
         Self {
             // Use cell size of 16 units - balances precision vs performance
             // Organisms with sensory range up to 50 will check ~9 buckets
-            organisms: SpatialHash::new(16.0),
+            organisms: SpatialHash::new(crate::world::CHUNK_SIZE as f32),
         }
     }
 }

@@ -220,14 +220,14 @@ fn detect_species_interactions(
     }
 
     // Check for mutualistic relationships (different trophic levels that benefit each other)
-    for &species_a in &species_ids {
-        for &species_b in &species_ids {
+    for &species_a in &buffers.species_ids {
+        for &species_b in &buffers.species_ids {
             if species_a >= species_b {
                 continue;
             }
 
-            let group_a = &species_groups[&species_a];
-            let group_b = &species_groups[&species_b];
+            let group_a = &buffers.species_groups[&species_a];
+            let group_b = &buffers.species_groups[&species_b];
 
             // Check if mutualistic relationship is likely
             if is_mutualistic_relationship(group_a, group_b) {
@@ -254,16 +254,13 @@ fn is_predator_prey_relationship(
     let predator_is_consumer = predator_group.iter()
         .any(|(org_type, _)| matches!(org_type, OrganismType::Consumer));
     
-    let prey_is_producer = prey_group.iter()
-        .any(|(org_type, _)| matches!(org_type, OrganismType::Producer));
-    
     let prey_is_smaller = predator_group.iter()
         .any(|(_, traits)| {
             prey_group.iter()
                 .any(|(_, prey_traits)| traits.size > prey_traits.size * 1.5)
         });
 
-    predator_is_consumer && (prey_is_producer || prey_is_smaller)
+    predator_is_consumer && prey_is_smaller
 }
 
 /// Check if a competitive relationship is likely

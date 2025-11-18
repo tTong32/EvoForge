@@ -78,7 +78,7 @@ evolution-sim/
 
 ### World System
 
-The world is divided into **chunks** (64×64 cells each), stored sparsely in a `HashMap`. This allows:
+The world is divided into **chunks** (16x16 cells each), stored sparsely in a `HashMap`. This allows:
 - Memory efficiency (only active chunks in memory)
 - Parallel processing of independent chunks
 - Lazy loading of distant regions

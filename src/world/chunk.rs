@@ -1,7 +1,13 @@
 use crate::world::cell::Cell;
 
-/// Size of a chunk in cells (64x64 = 4096 cells per chunk)
-pub const CHUNK_SIZE: usize = 64;
+/// Size of a chunk in cells (e.g., 8x8 = 64 cells per chunk)
+pub const CHUNK_SIZE: usize = 8;
+
+/// Size of a chunk in world units (fixed at 64x64)
+pub const CHUNK_WORLD_SIZE: f32 = 64.0;
+
+/// Size of each cell in world units (calculated from chunk size)
+pub const CELL_SIZE: f32 = CHUNK_WORLD_SIZE / CHUNK_SIZE as f32;
 
 /// A chunk represents a fixed-size region of the world
 /// Chunks are stored sparsely (only active chunks exist in memory)
@@ -58,16 +64,22 @@ impl Chunk {
     /// Convert world coordinates to chunk coordinates
     pub fn world_to_chunk(world_x: f32, world_y: f32) -> (i32, i32) {
         (
-            (world_x / CHUNK_SIZE as f32).floor() as i32,
-            (world_y / CHUNK_SIZE as f32).floor() as i32,
+            (world_x / CHUNK_WORLD_SIZE).floor() as i32,
+            (world_y / CHUNK_WORLD_SIZE).floor() as i32,
         )
     }
 
     /// Convert world coordinates to local cell coordinates within a chunk
     pub fn world_to_local(world_x: f32, world_y: f32) -> (usize, usize) {
+        // First get the position relative to the chunk origin
+        let chunk_x = (world_x / CHUNK_WORLD_SIZE).floor() as i32;
+        let chunk_y = (world_y / CHUNK_WORLD_SIZE).floor() as i32;
+        let local_x = world_x - (chunk_x as f32 * CHUNK_WORLD_SIZE);
+        let local_y = world_y - (chunk_y as f32 * CHUNK_WORLD_SIZE);
+        
         (
-            (world_x.rem_euclid(CHUNK_SIZE as f32)) as usize,
-            (world_y.rem_euclid(CHUNK_SIZE as f32)) as usize,
+            (local_x / CELL_SIZE).floor() as usize,
+            (local_y / CELL_SIZE).floor() as usize,
         )
     }
 

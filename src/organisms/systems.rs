@@ -145,8 +145,8 @@ pub fn spawn_initial_organisms(
     let spawn_count = tuning.initial_spawn_count;
 
     // Spawn organisms randomly within initialized chunks
-    // Chunks are from -1 to 1, each chunk is 64x64 cells
-    let world_size = 3 * 64; // 3 chunks * 64 cells
+    // Chunks are from -1 to 1
+    let world_size = 3 * crate::world::CHUNK_SIZE as i32; // 3 chunks
     let spawn_range = world_size as f32 / 2.0; // -range to +range
 
     let mut first_entity = None;
@@ -651,49 +651,21 @@ pub fn handle_eating(
                // Get current cell
         if let Some(cell) = world_grid.get_cell_mut(position.x(), position.y()) {
             // Hard capped per-organism consumption rate (Phase 2).
-            let trait_consumption = traits_opt
-                .map(|t| t.consumption_rate)
-                .unwrap_or(tuning.consumption_rate_base);
-            let consumption_rate = trait_consumption;
+        let plant_consumption_rate = traits_opt
+            .map(|t| t.plant_consumption_rate)
+            .unwrap_or(tuning.plant_consumption_rate_base);
+        let meat_consumption_rate = traits_opt
+            .map(|t| t.meat_consumption_rate)
+            .unwrap_or(tuning.meat_consumption_rate_base);
 
             let consumed = match organism_type {
-                OrganismType::Producer => {
-                    // Producers are no longer spawned; keep logic for now.
-                    let sunlight = cell
-                        .get_resource(ResourceType::Sunlight)
-                        .min(consumption_rate * dt);
-                    let water = cell
-                        .get_resource(ResourceType::Water)
-                        .min(consumption_rate * dt * 0.5);
-                    let mineral = cell
-                        .get_resource(ResourceType::Mineral)
-                        .min(consumption_rate * dt * 0.2);
-
-                    cell.set_resource(
-                        ResourceType::Sunlight,
-                        cell.get_resource(ResourceType::Sunlight) - sunlight,
-                    );
-                    cell.set_resource(
-                        ResourceType::Water,
-                        cell.get_resource(ResourceType::Water) - water,
-                    );
-                    cell.set_resource(
-                        ResourceType::Mineral,
-                        cell.get_resource(ResourceType::Mineral) - mineral,
-                    );
-                    cell.add_pressure(ResourceType::Sunlight, sunlight);
-                    cell.add_pressure(ResourceType::Water, water);
-                    cell.add_pressure(ResourceType::Mineral, mineral);
-
-                    (sunlight + water + mineral) * energy_conversion_efficiency
-                }
                 OrganismType::Consumer => {
                     // Consumers eat plant percentages (herbivory),
                     // attack live prey, and can feed on carcasses over multiple ticks.
 
                     // 1) If we have a carcass to feed on, prioritize that.
                     if let Some(mut feeding) = feeding_opt {
-                        let max_intake = (consumption_rate * dt).min(feeding.remaining_energy);
+                        let max_intake = (meat_consumption_rate * dt).min(feeding.remaining_energy);
                         if max_intake > 0.0 {
                             feeding.remaining_energy -= max_intake;
                             let gained = max_intake * energy_conversion_efficiency;
@@ -719,7 +691,7 @@ pub fn handle_eating(
                     }
 
                     // Herbivory: consume a capped fraction of plant community.
-                    let max_fraction = (consumption_rate * dt).min(1.0);
+                    let max_fraction = (plant_consumption_rate * dt).min(1.0);
                     let mut remaining_fraction = max_fraction;
                     let mut eaten_fraction = 0.0;
                     let mut sum_after_eating = 0.0; // Track sum during eating to avoid second iteration
@@ -752,7 +724,7 @@ pub fn handle_eating(
                     // Legacy prey scalar resource (will be replaced).
                     let prey_resource = cell
                         .get_resource(ResourceType::Prey)
-                        .min(consumption_rate * dt);
+                        .min(meat_consumption_rate * dt);
 
                     cell.set_resource(
                         ResourceType::Prey,
@@ -762,22 +734,6 @@ pub fn handle_eating(
 
                     let prey_energy = prey_resource * 2.0 * energy_conversion_efficiency;
                     plant_energy + prey_energy
-                }
-                OrganismType::Decomposer => {
-                    // Decomposers are no longer spawned; keep legacy behavior for now.
-                    let detritus = cell
-                        .get_resource(ResourceType::Detritus)
-                        .min(consumption_rate * dt);
-
-                    cell.set_resource(
-                        ResourceType::Detritus,
-                        cell.get_resource(ResourceType::Detritus) - detritus,
-                    );
-                    cell.add_pressure(ResourceType::Detritus, detritus);
-
-                    detritus
-                        * energy_conversion_efficiency
-                        * tuning.decomposer_efficiency_multiplier
                 }
             };
 
@@ -1344,9 +1300,7 @@ pub fn log_all_organisms(
                 crate::organisms::behavior::BehaviorState::Migrating => "Migrating",
             };
             let organism_type = match org_type {
-                OrganismType::Producer => "Producer",
                 OrganismType::Consumer => "Consumer",
-                OrganismType::Decomposer => "Decomposer",
             };
             let (target_x, target_y) = behavior
                 .target_position

@@ -83,4 +83,11 @@ impl WorldGrid {
     pub fn remove_chunk(&mut self, chunk_x: i32, chunk_y: i32) {
         self.chunks.remove(&(chunk_x, chunk_y));
     }
+    
+    /// Check if chunk coordinates are within world bounds
+    /// Returns true if chunk is within MAX_WORLD_RADIUS_CHUNKS of origin
+    pub fn is_within_bounds(&self, chunk_x: i32, chunk_y: i32) -> bool {
+        use crate::world::MAX_WORLD_RADIUS_CHUNKS;
+        chunk_x.abs() <= MAX_WORLD_RADIUS_CHUNKS && chunk_y.abs() <= MAX_WORLD_RADIUS_CHUNKS
+    }
 }

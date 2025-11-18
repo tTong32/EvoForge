@@ -22,7 +22,7 @@ impl Default for DiseaseSystem {
             active_diseases: Vec::new(),
             species_resistance: HashMap::new(),
             total_diseases: 0,
-            spawn_cooldown: 800.0, // Initial cooldown
+            spawn_cooldown: 35.8, // 800.0 / 22.34 (scaled for 600-tick lifetime)
         }
     }
 }
@@ -108,6 +108,7 @@ pub struct Infected {
 pub fn update_disease_system(
     mut commands: Commands,
     mut disease_system: ResMut<DiseaseSystem>,
+    mut buffers: ResMut<DiseaseSystemBuffers>,
     time: Res<Time>,
     organism_query: Query<(Entity, &Position, &SpeciesId), With<Alive>>,
     infected_query: Query<(Entity, &Position, &Infected), With<Alive>>,
@@ -129,7 +130,7 @@ pub fn update_disease_system(
         if fastrand::f32() < 0.0005 { // Very rare
             spawn_random_disease(&mut disease_system, &organism_query);
         }
-        disease_system.spawn_cooldown = fastrand::f32() * 1200.0 + 600.0;
+        disease_system.spawn_cooldown = fastrand::f32() * 53.7 + 26.9; // Scaled for 600-tick lifetime
     }
 
     // Spread diseases (read-only access to Infected)
@@ -320,10 +321,10 @@ fn spawn_random_disease(
 
     // Set parameters based on type
     let (virulence, lethality, contagion_radius, duration) = match disease_type {
-        DiseaseType::Viral => (0.8 + fastrand::f32() * 0.2, 0.4 + fastrand::f32() * 0.3, 15.0, 200.0),
-        DiseaseType::Bacterial => (0.5 + fastrand::f32() * 0.3, 0.3 + fastrand::f32() * 0.5, 10.0, 300.0),
-        DiseaseType::Parasitic => (0.2 + fastrand::f32() * 0.3, 0.7 + fastrand::f32() * 0.3, 8.0, 500.0),
-        DiseaseType::Fungal => (0.3 + fastrand::f32() * 0.2, 0.5 + fastrand::f32() * 0.3, 12.0, 400.0),
+        DiseaseType::Viral => (0.8 + fastrand::f32() * 0.2, 0.4 + fastrand::f32() * 0.3, 15.0, 8.95), // 200.0 / 22.34
+        DiseaseType::Bacterial => (0.5 + fastrand::f32() * 0.3, 0.3 + fastrand::f32() * 0.5, 10.0, 13.4), // 300.0 / 22.34
+        DiseaseType::Parasitic => (0.2 + fastrand::f32() * 0.3, 0.7 + fastrand::f32() * 0.3, 8.0, 22.4), // 500.0 / 22.34
+        DiseaseType::Fungal => (0.3 + fastrand::f32() * 0.2, 0.5 + fastrand::f32() * 0.3, 12.0, 17.9), // 400.0 / 22.34
     };
 
     // Optionally target a random species (50% chance)
