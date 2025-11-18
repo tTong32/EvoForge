@@ -28,8 +28,8 @@ pub struct OrganismPlugin;
 
 impl Plugin for OrganismPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<systems::TrackedOrganism>()
-            .init_resource::<systems::AllOrganismsLogger>()
+        app
+            .init_resource::<systems::TrackedOrganism>()
             .init_resource::<systems::SpatialHashTracker>()
             .init_resource::<systems::PredationEventGrouping>() // Optimization: reuse HashMap
             .init_resource::<systems::SpatialQueryBuffer>() // Optimization: reuse Vec buffer for spatial queries
@@ -41,6 +41,7 @@ impl Plugin for OrganismPlugin {
             .init_resource::<speciation::SpeciesTracker>() // Step 8: Speciation system
             .init_resource::<tuning::EcosystemTuning>() // Step 8: Tuning parameters
             .init_resource::<ecosystem_stats::EcosystemStats>() // Step 8: Ecosystem statistics
+            .init_resource::<ecosystem_stats::SpeciesFitnessLogger>() // AI model training data logger
             .init_resource::<disease::DiseaseSystem>() // Step 9: Disease system
             .init_resource::<disease::DiseaseSystemBuffers>() // Optimization: reuse disease system buffers
             .init_resource::<coevolution::CoEvolutionSystem>() // Step 9: Co-evolution system
@@ -76,8 +77,7 @@ impl Plugin for OrganismPlugin {
                 Update,
                 (
                     ecosystem_stats::collect_ecosystem_stats, // Step 8: Ecosystem statistics
-                    systems::log_all_organisms,
-                    systems::log_tracked_organism,
+                    ecosystem_stats::log_species_fitness, // AI model training data logging
                 )
             );
     }

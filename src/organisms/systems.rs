@@ -54,7 +54,7 @@ pub struct TrackedOrganism {
     header_written: bool,
 }
 
-// TRACKED ORGANISM LOGGING
+// TRACKED ORGANISM LOGGING (UNUSED)
 impl Default for TrackedOrganism {
     fn default() -> Self {
         let logs_dir = ensure_logs_directory();
@@ -76,7 +76,7 @@ impl Default for TrackedOrganism {
     }
 }
 
-/// Resource for bulk organism logging
+/// Resource for bulk organism logging (UNUSED)
 #[derive(Resource)]
 pub struct AllOrganismsLogger {
     csv_writer: Option<BufWriter<File>>,

@@ -115,6 +115,11 @@ impl SpeciesTracker {
     pub fn get_all_species(&self) -> Vec<u32> {
         self.species_centroids.keys().copied().collect()
     }
+
+    /// Get the representative genome for a species
+    pub fn get_genome(&self, species_id: u32) -> Option<&Genome> {
+        self.species_centroids.get(&species_id)
+    }
 }
 
 /// Update species assignments periodically (Step 8 - Speciation)
