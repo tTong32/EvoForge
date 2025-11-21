@@ -1,4 +1,0 @@
-- energy conversion efficiency should be a gene
-- It takes way too long for something to die (~112 minutes at 60 FPS)
-- Takes way too long for something to fill its snergy (73 seconds)
-- Increase consumption values (increase amount of energy gained, increase % of plants eaten)
