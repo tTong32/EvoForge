@@ -2,7 +2,7 @@ from tabnanny import verbose
 import xgboost as xgb
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import train_test_spli
+from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error, r2_score
 import pickle
 from pathlib import Path
@@ -12,7 +12,7 @@ class FitnessPredictor:
     This class builds and trains a model to predict genome fitness
     """
 
-    def ___init___(self, model_params: dict = None):
+    def __init__(self, model_params: dict = None):
         default_params = {
             'n_estimators': 200,      # Number of trees
             'max_depth': 6,            # How deep trees can go (deeper = more complex)
@@ -41,12 +41,18 @@ class FitnessPredictor:
 
         if verbose: 
             print(" Training model...")
-            print(f" Training model on {len(x)} samples")
+            print(f" Training model on {len(X)} samples")
+        
+        # Split data into train and test sets
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=42)
+        
+        # Store feature names for later use
+        self.feature_names = X.columns.tolist()
         
         self.model = xgb.XGBRegressor(**self.params)
 
         self.model.fit(
-            X_train, y_train
+            X_train, y_train,
             eval_set=[(X_test, y_test)],
             verbose=verbose
         )
@@ -73,13 +79,13 @@ class FitnessPredictor:
     
     def predict(self, X: pd.DataFrame) -> np.ndarray:
         if not self.is_trained:
-            raise ValueError("Mode not trained yet! Call train() first.")
+            raise ValueError("Model not trained yet! Call train() first.")
 
-        return self.mode.predict(X)
+        return self.model.predict(X)
     
-    def get_feature_important(self, top_n: int = 20) -> pd.DataFrame:
+    def get_feature_importance(self, top_n: int = 20) -> pd.DataFrame:
         if not self.is_trained:
-            raise ValueError("Mode not trained yet!")
+            raise ValueError("Model not trained yet!")
         
         importances = self.model.feature_importances_
 

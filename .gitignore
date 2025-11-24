@@ -26,3 +26,8 @@ data/logs/*
 data/outputs/*
 !data/outputs/.gitkeep
 
+# Python virtual environment
+venv/
+env/
+ENV/
+.venv/
