@@ -79,7 +79,7 @@ impl Default for EcosystemTuning {
             max_reproduction_cooldown: 161.0,   // 3600 / 22.34 ≈ 161 ticks
 
             // Spawn
-            initial_spawn_count: 100,
+            initial_spawn_count: 99,
 
             // Speciation
             speciation_threshold: 0.15,

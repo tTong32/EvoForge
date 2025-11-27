@@ -42,6 +42,8 @@ pub struct DiseaseSystemBuffers {
     pub to_remove: Vec<Entity>,
     /// Reusable HashMap for species traits
     pub species_traits: HashMap<u32, Vec<f32>>,
+    /// Reusable buffer for spatial hash queries
+    pub spatial_query_buffer: Vec<Entity>,
 }
 
 impl DiseaseSystemBuffers {
@@ -56,6 +58,7 @@ impl DiseaseSystemBuffers {
         for vec in self.species_traits.values_mut() {
             vec.clear();
         }
+        self.spatial_query_buffer.clear();
     }
 }
 
@@ -195,21 +198,27 @@ fn spread_diseases(
         if let Some(infected_organisms) = buffers.infected_by_disease.get(&disease.id) {
             // For each infected organism, try to spread to nearby uninfected organisms
             for (infected_entity, infected_pos) in infected_organisms {
-                let nearby_entities = spatial_hash.organisms.query_radius(*infected_pos, disease.contagion_radius);
+                // Use query_radius_into to avoid allocation
+                buffers.spatial_query_buffer.clear();
+                spatial_hash.organisms.query_radius_into(
+                    *infected_pos,
+                    disease.contagion_radius,
+                    &mut buffers.spatial_query_buffer,
+                );
 
-                for nearby_entity in nearby_entities {
+                for nearby_entity in &buffers.spatial_query_buffer {
                     // Skip if it's the same entity
-                    if *infected_entity == nearby_entity {
+                    if *infected_entity == *nearby_entity {
                         continue;
                     }
 
                     // Skip if already infected (any disease)
-                    if buffers.infected_entities.contains(&nearby_entity) {
+                    if buffers.infected_entities.contains(nearby_entity) {
                         continue;
                     }
 
                     // Check if nearby organism exists and is alive
-                    if let Ok((entity, position, species_id)) = organism_query.get(nearby_entity) {
+                    if let Ok((entity, position, species_id)) = organism_query.get(*nearby_entity) {
                         // Check if disease targets this species (or no target)
                         if let Some(target_species) = disease.target_species {
                             if species_id.value() != target_species {

@@ -3,6 +3,7 @@ use crate::world::{ResourceType, WorldGrid};
 use bevy::prelude::*;
 use glam::Vec2;
 use std::collections::HashMap;
+use std::sync::Arc;
 use smallvec::{SmallVec, smallvec};
 
 /// Behavior state machine - organisms can be in one of these states
@@ -123,9 +124,10 @@ impl SensoryData {
 }
 
 /// Cache sensory data for organisms that haven't moved much (optimization 3)
+/// Uses Arc<SensoryData> to avoid expensive cloning - Arc cloning is just a reference count increment
 #[derive(Resource)]
 pub struct SensoryDataCache {
-    cache: HashMap<Entity, (Vec2, SensoryData, u32)>, // (position, data, age_in_frames)
+    cache: HashMap<Entity, (Vec2, Arc<SensoryData>, u32)>, // (position, data, age_in_frames)
     max_cache_age: u32,
     cleanup_counter: u32,
     cleanup_interval: u32,
@@ -156,7 +158,7 @@ impl SensoryDataCache {
         entity: Entity, 
         position: Vec2, 
         sensory_range: f32,
-        compute_fn: F) -> SensoryData
+        compute_fn: F) -> Arc<SensoryData>
     where
         F: FnOnce() -> SensoryData,
     {
@@ -170,13 +172,14 @@ impl SensoryDataCache {
             // Use cache if position hasn't changed much and cache isn't too old
             // Use squared distance to avoid sqrt
             if (position - *cached_pos).length_squared() < cache_threshold_sq && *age < self.max_cache_age {
-                return cached_data.clone();
+                // Clone Arc (cheap - just increments reference count)
+                return Arc::clone(cached_data);
             }
         }
         
         // Compute new sensory data
-        let data = compute_fn();
-        self.cache.insert(entity, (position, data.clone(), 0));
+        let data = Arc::new(compute_fn());
+        self.cache.insert(entity, (position, Arc::clone(&data), 0));
         data
     }
     

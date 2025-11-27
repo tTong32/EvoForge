@@ -7,6 +7,13 @@ use std::collections::HashMap;
 /// Step 8: Now configurable via EcosystemTuning
 pub const DEFAULT_SPECIATION_THRESHOLD: f32 = 0.15;
 
+/// Reusable buffer for speciation calculations (avoids HashMap allocations)
+#[derive(Resource, Default)]
+pub struct SpeciationBuffer {
+    /// Reusable storage for genome grouping
+    species_genomes: HashMap<u32, Vec<Genome>>,
+}
+
 /// Tracks species information for speciation system
 #[derive(Resource)]
 pub struct SpeciesTracker {
@@ -61,19 +68,20 @@ impl SpeciesTracker {
     pub fn update_centroids(
         &mut self,
         organisms: &[(Entity, &Genome, &SpeciesId)],
+        buffer: &mut SpeciationBuffer,
     ) {
-        // Group organisms by species
-        let mut species_genomes: HashMap<u32, Vec<&Genome>> = HashMap::new();
+        // Group organisms by species - REUSE buffer
+        buffer.species_genomes.clear();
         
         for (_entity, genome, species_id) in organisms {
-            species_genomes
+            buffer.species_genomes
                 .entry(species_id.value())
                 .or_insert_with(Vec::new)
-                .push(genome);
+                .push((*genome).clone()); // Clone here since we need owned values
         }
 
         // Update centroids with average genome per species
-        for (species_id, genomes) in species_genomes {
+        for (species_id, genomes) in &buffer.species_genomes {
             if genomes.is_empty() {
                 continue;
             }
@@ -84,7 +92,7 @@ impl SpeciesTracker {
             avg_genes.resize(genome_size, 0.5);
             let mut avg_genome = Genome::new(avg_genes);
             
-            for genome in &genomes {
+            for genome in genomes {
                 for i in 0..avg_genome.genes.len().min(genome.genes.len()) {
                     avg_genome.genes[i] += genome.genes[i];
                 }
@@ -97,7 +105,7 @@ impl SpeciesTracker {
                 avg_genome.genes[i] = avg_genome.genes[i].clamp(0.0, 1.0);
             }
 
-            self.species_centroids.insert(species_id, avg_genome);
+            self.species_centroids.insert(*species_id, avg_genome);
         }
     }
 
@@ -125,6 +133,7 @@ impl SpeciesTracker {
 /// Update species assignments periodically (Step 8 - Speciation)
 pub fn update_speciation(
     mut tracker: ResMut<SpeciesTracker>,
+    mut buffer: ResMut<SpeciationBuffer>, // Add buffer parameter
     tuning: Option<Res<crate::organisms::EcosystemTuning>>, // Step 8: Optional tuning
     mut query: Query<(Entity, &Genome, &mut SpeciesId), With<crate::organisms::components::Alive>>,
 ) {
@@ -138,7 +147,7 @@ pub fn update_speciation(
     if tracker.update_counter % 100 == 0 {
         let organisms: Vec<_> = query.iter().collect();
         let previous_count = tracker.species_count();
-        tracker.update_centroids(&organisms);
+        tracker.update_centroids(&organisms, &mut buffer); // Pass buffer
         let new_count = tracker.species_count();
         
         if new_count != previous_count {

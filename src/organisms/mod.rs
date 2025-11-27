@@ -39,6 +39,7 @@ impl Plugin for OrganismPlugin {
             .init_resource::<crate::utils::SpatialHashGrid>()
             .init_resource::<behavior::SensoryDataCache>() // Add sensory cache (optimization 3)
             .init_resource::<speciation::SpeciesTracker>() // Step 8: Speciation system
+            .init_resource::<speciation::SpeciationBuffer>() // Optimization: reuse HashMap for speciation
             .init_resource::<tuning::EcosystemTuning>() // Step 8: Tuning parameters
             .init_resource::<ecosystem_stats::EcosystemStats>() // Step 8: Ecosystem statistics
             .init_resource::<ecosystem_stats::SpeciesFitnessLogger>() // AI model training data logger

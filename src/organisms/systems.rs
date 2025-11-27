@@ -143,6 +143,8 @@ pub fn spawn_initial_organisms(
 
     let mut rng = fastrand::Rng::new();
     let spawn_count = tuning.initial_spawn_count;
+    // Note: initial_species_count removed - using fixed value for now
+    let species_count = 3;
 
     // Spawn organisms randomly within initialized chunks
     // Chunks are from -1 to 1
@@ -151,57 +153,71 @@ pub fn spawn_initial_organisms(
 
     let mut first_entity = None;
 
-    for i in 0..spawn_count {
-        let x = rng.f32() * spawn_range * 2.0 - spawn_range;
-        let y = rng.f32() * spawn_range * 2.0 - spawn_range;
+    let base_genomes: Vec<Genome> = (0..species_count)
+        .map(|_| Genome::random())
+        .collect();
 
-        // Create random genome for this organism
-        let genome = Genome::random();
+    for (species_idx, base_genome) in base_genomes.iter().enumerate() {
+        for org_idx in 0..(spawn_count/species_count) {
+            let x = rng.f32() * spawn_range * 2.0 - spawn_range;
+            let y = rng.f32() * spawn_range * 2.0 - spawn_range;
 
-        // Express traits from genome
-        let size = traits::express_size(&genome);
-        let max_energy = traits::express_max_energy(&genome);
-        let metabolism_rate = traits::express_metabolism_rate(&genome);
-        let movement_cost = traits::express_movement_cost(&genome);
-        let reproduction_cooldown = traits::express_reproduction_cooldown(&genome) as u32;
+            // Create random genome for this organism
+            let mut genome = base_genome.clone();
 
-        // Phase 1+: only spawn consumer organisms; plants are cell-based now.
-        let organism_type = OrganismType::Consumer;
+            for i in 0..crate::organisms::genetics::GENOME_SIZE {
+                if rng.f32() < 0.1 {
+                    let mutation = (rng.f32() - 0.5) * 0.1;
+                    let new_value = (genome.get_gene(i) + mutation).clamp(0.0, 1.0);
+                    genome.set_gene(i, new_value);
+                }
+            }
 
-        // Random initial velocity
-        let vel_x = rng.f32() * 20.0 - 10.0;
-        let vel_y = rng.f32() * 20.0 - 10.0;
+            // Express traits from genome
+            let size = traits::express_size(&genome);
+            let max_energy = traits::express_max_energy(&genome);
+            let metabolism_rate = traits::express_metabolism_rate(&genome);
+            let movement_cost = traits::express_movement_cost(&genome);
+            let reproduction_cooldown = traits::express_reproduction_cooldown(&genome) as u32;
 
-        let cached_traits = CachedTraits::from_genome(&genome);
-        
-        // Step 8: Assign species ID using speciation system
-        let species_id = species_tracker.find_or_create_species(&genome);
+            // Phase 1+: only spawn consumer organisms; plants are cell-based now.
+            let organism_type = OrganismType::Consumer;
 
-        let learning_rate = traits::express_learning_rate(&genome);
+            // Random initial velocity
+            let vel_x = rng.f32() * 20.0 - 10.0;
+            let vel_y = rng.f32() * 20.0 - 10.0;
 
-        let entity = commands
-            .spawn((
-                Position::new(x, y),
-                Velocity::new(vel_x, vel_y),
-                Energy::new(max_energy),
-                Age::new(),
-                Size::new(size),
-                Metabolism::new(metabolism_rate, movement_cost),
-                ReproductionCooldown::new(reproduction_cooldown),
-                genome,
-                cached_traits,
-                species_id, // Step 8: Use speciation-assigned species ID
-                organism_type,
-                // Phase 2: individual learning about prey.
-                IndividualLearning::new(learning_rate),
-                Behavior::new(),
-                Alive,
-            ))
-            .id();
+            let cached_traits = CachedTraits::from_genome(&genome);
+            
+            // Step 8: Assign species ID using speciation system
+            let species_id = species_tracker.find_or_create_species(&genome);
 
-        // Track the first organism spawned
-        if i == 0 {
-            first_entity = Some(entity);
+            let learning_rate = traits::express_learning_rate(&genome);
+
+            let entity = commands
+                .spawn((
+                    Position::new(x, y),
+                    Velocity::new(vel_x, vel_y),
+                    Energy::new(max_energy),
+                    Age::new(),
+                    Size::new(size),
+                    Metabolism::new(metabolism_rate, movement_cost),
+                    ReproductionCooldown::new(reproduction_cooldown),
+                    genome,
+                    cached_traits,
+                    species_id, // Step 8: Use speciation-assigned species ID
+                    organism_type,
+                    // Phase 2: individual learning about prey.
+                    IndividualLearning::new(learning_rate),
+                    Behavior::new(),
+                    Alive,
+                ))
+                .id();
+
+            // Track the first organism spawned
+            if species_idx == 0 && org_idx == 0 {
+                first_entity = Some(entity);
+            }
         }
     }
 
@@ -394,6 +410,11 @@ pub fn update_metabolism(
     });
 }
 
+#[derive(Resource, Default)]
+pub struct BehvaiourUpdateBuffer {
+    entity_data: Vec<(Entity, Position, Energy, CachedTraits, SpeciesId, OrganismType, Size)>,
+}
+
 /// Update behavior decisions based on sensory input and organism state
 pub fn update_behavior(
     mut query: Query<
@@ -431,6 +452,11 @@ pub fn update_behavior(
     // Periodic cleanup of sensory cache
     sensory_cache.maybe_cleanup();
     let dt = time.delta_seconds();
+    
+
+    // Pre-compute constant values outside loop
+    let hunger_decay_factor = (1.0 - dt * 0.25).max(0.65);
+    let migration_reached_threshold_sq = 16.0;
 
     for (entity, position, mut behavior, energy, cached_traits, species_id, organism_type, size, learning_opt) in
         query.iter_mut()
@@ -440,17 +466,18 @@ pub fn update_behavior(
 
         // Settle migration target if already reached (use squared distance to avoid sqrt)
         if let Some(target) = behavior.migration_target {
-            if (position.0 - target).length_squared() < 16.0 {
+            if (position.0 - target).length_squared() < migration_reached_threshold_sq {
                 behavior.migration_target = None;
             }
         }
 
-        // Update hunger & threat memories
-        let hunger_input = (1.0 - energy.ratio()).max(0.0);
+        // Update hunger & threat memories - cache energy ratio
+        let energy_ratio = energy.ratio();
+        let hunger_input = (1.0 - energy_ratio).max(0.0);
         behavior.hunger_memory = (behavior.hunger_memory
             + hunger_input * cached_traits.hunger_memory_rate * dt)
             .min(2.0);
-        behavior.hunger_memory *= (1.0 - dt * 0.25).max(0.65);
+        behavior.hunger_memory *= hunger_decay_factor;
 
         // Get sensory range from cached traits
         let sensory_range = cached_traits.sensory_range;
@@ -694,26 +721,30 @@ pub fn handle_eating(
                     let max_fraction = (plant_consumption_rate * dt).min(1.0);
                     let mut remaining_fraction = max_fraction;
                     let mut eaten_fraction = 0.0;
-                    let mut sum_after_eating = 0.0; // Track sum during eating to avoid second iteration
 
                     if !cell.plant_community.is_empty() && remaining_fraction > 0.0 {
                         for species in cell.plant_community.iter_mut() {
                             if remaining_fraction <= 0.0 {
-                                // Still need to sum remaining species
-                                sum_after_eating += species.percentage;
-                                continue;
+                                break; // Stop when done eating
                             }
                             let bite = species.percentage.min(remaining_fraction);
                             species.percentage -= bite;
                             remaining_fraction -= bite;
                             eaten_fraction += bite;
-                            sum_after_eating += species.percentage;
                         }
 
-                        // Normalize after grazing if needed (single pass)
-                        if sum_after_eating > 1.0 {
+                        // Calculate sum after eating for normalization
+                        let sum_after_eating: f32 = cell.plant_community.iter()
+                            .map(|s| s.percentage)
+                            .sum();
+
+                        // Normalize after grazing to ensure percentages sum to 1.0
+                        if sum_after_eating > 0.0 {
                             let inv = 1.0 / sum_after_eating;
                             cell.plant_community.iter_mut().for_each(|s| s.percentage *= inv);
+                        } else {
+                            // All plants eaten - clear community
+                            cell.plant_community.clear();
                         }
                     }
 
@@ -722,13 +753,12 @@ pub fn handle_eating(
                         eaten_fraction * size.value() * energy_conversion_efficiency;
 
                     // Legacy prey scalar resource (will be replaced).
-                    let prey_resource = cell
-                        .get_resource(ResourceType::Prey)
-                        .min(meat_consumption_rate * dt);
+                    let current_prey = cell.get_resource(ResourceType::Prey);
+                    let prey_resource = current_prey.min(meat_consumption_rate * dt);
 
                     cell.set_resource(
                         ResourceType::Prey,
-                        cell.get_resource(ResourceType::Prey) - prey_resource,
+                        current_prey - prey_resource,
                     );
                     cell.add_pressure(ResourceType::Prey, prey_resource);
 
@@ -754,8 +784,7 @@ pub fn handle_eating(
 
                     if !eligible_children.is_empty() {
                         let child_count = eligible_children.len() as f32;
-                        let share_total = (consumed * traits.meal_share_percentage)
-                            .min(energy.current + consumed);
+                        let share_total = consumed * traits.meal_share_percentage;
                         let per_child = share_total / child_count;
 
                         // Apply energy sharing to collected children (O(1) lookup with HashSet)
@@ -819,7 +848,9 @@ pub fn handle_reproduction(
             continue;
         }
 
-        if energy.ratio() < cached_traits.reproduction_threshold {
+        // Cache energy ratio to avoid multiple calculations
+        let energy_ratio = energy.ratio();
+        if energy_ratio < cached_traits.reproduction_threshold {
             continue;
         }
 
@@ -916,8 +947,9 @@ pub fn handle_reproduction(
             }
 
             let available_energy = parent_energy.current.max(0.0);
-            let per_child_energy = (available_energy * event.energy_share)
-                .min(available_energy / count)
+            let total_energy_to_share = available_energy * event.energy_share;
+            let per_child_energy = (total_energy_to_share / count)
+                .min(available_energy / count)  // Can't give more than parent has per child
                 .max(0.0);
             let total_energy_cost = per_child_energy * count;
             parent_energy.current = (available_energy - total_energy_cost).max(0.0);

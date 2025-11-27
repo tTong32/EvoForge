@@ -14,7 +14,7 @@ use glam::Vec2;
 use std::collections::HashSet;
 
 pub use cell::Cell;
-pub use cell::{ResourceType, TerrainType};
+pub use cell::{ResourceType, TerrainType, RESOURCE_TYPE_COUNT};
 pub use chunk::Chunk;
 pub use chunk::CHUNK_SIZE;
 pub use chunk::CHUNK_WORLD_SIZE;
@@ -92,6 +92,13 @@ pub struct WorldBounds {
     activity_bounds: Option<(i32, i32, i32, i32)>, // (min_x, max_x, min_y, max_y)
 }
 
+/// Reusable buffer for cell updates (avoids repeated allocations)
+#[derive(Resource, Default)]
+pub struct CellUpdateBuffer {
+    /// Buffer for cell updates: (chunk_x, chunk_y, cell_x, cell_y) -> updated Cell
+    update_buffer: std::collections::HashMap<(i32, i32, usize, usize), Cell>,
+}
+
 impl WorldBounds {
     pub fn update_activity_bounds(&mut self, min_x: i32, max_x: i32, min_y: i32, max_y: i32) {
         self.activity_bounds = Some((min_x, max_x, min_y, max_y));
@@ -120,6 +127,7 @@ impl Plugin for WorldPlugin {
             .init_resource::<ClimateState>()
             .init_resource::<DirtyChunks>()
             .init_resource::<WorldBounds>()
+            .init_resource::<CellUpdateBuffer>() // Reusable buffer for cell updates
             .init_resource::<events::DisasterEvents>() // Step 9: Major disasters
             .add_systems(Startup, initialize_world)
             .add_systems(
@@ -278,17 +286,23 @@ fn unload_distant_chunks(
 /// Update all chunks: climate and resource regeneration/decay
 /// Step 10: PARALLELIZED - Processes chunks in parallel using rayon
 /// OPTIMIZED: Only updates dirty cells and cells near organisms
+/// OPTIMIZED: Uses buffer to minimize cell cloning
 fn update_chunks(
     mut world_grid: ResMut<WorldGrid>, 
     climate: Res<ClimateState>,
     dirty_chunks: Res<DirtyChunks>,
+    mut update_buffer: ResMut<CellUpdateBuffer>,
 ) {
     use rayon::prelude::*;
     
     let chunk_coords: Vec<_> = world_grid.get_chunk_coords();
     let climate_ref = climate.as_ref();
     
-    // Collect cells that need updating (read-only phase)
+    // Clear buffer but keep capacity
+    update_buffer.update_buffer.clear();
+    
+    // Phase 1: Collect cell coordinates that need updating (read-only, parallel)
+    // Store coordinates instead of cloning cells
     let cells_to_update: Vec<_> = chunk_coords
         .par_iter()
         .flat_map(|&(chunk_x, chunk_y)| {
@@ -299,14 +313,13 @@ fn update_chunks(
                     for y in 0..crate::world::chunk::CHUNK_SIZE {
                         for x in 0..crate::world::chunk::CHUNK_SIZE {
                             if dirty_chunks.should_update_cell(chunk_x, chunk_y, x, y) {
-                                if let Some(cell) = chunk.get_cell(x, y) {
+                                if chunk.get_cell(x, y).is_some() {
                                     let world_pos = Vec2::new(
                                         chunk_x as f32 * crate::world::chunk::CHUNK_WORLD_SIZE + x as f32 * crate::world::chunk::CELL_SIZE,
                                         chunk_y as f32 * crate::world::chunk::CHUNK_WORLD_SIZE + y as f32 * crate::world::chunk::CELL_SIZE,
                                     );
-                                    // Clone cell data for parallel processing
-                                    let cell_data = (chunk_x, chunk_y, x, y, world_pos, cell.clone());
-                                    updates.push(cell_data);
+                                    // Store coordinates only, not cell data
+                                    updates.push((chunk_x, chunk_y, x, y, world_pos));
                                 }
                             }
                         }
@@ -317,21 +330,34 @@ fn update_chunks(
         })
         .collect();
     
-    // Process updates in parallel (compute new climate values)
-    let updated_cells: Vec<_> = cells_to_update
+    // Phase 2: Process updates in parallel - read from world_grid, compute, store in buffer
+    let cell_updates: Vec<_> = cells_to_update
         .par_iter()
-        .map(|(chunk_x, chunk_y, x, y, world_pos, cell)| {
+        .filter_map(|(chunk_x, chunk_y, x, y, world_pos)| {
+            // Read cell (immutable borrow) - clone only once for computation
+            let cell = world_grid
+                .get_chunk(*chunk_x, *chunk_y)
+                .and_then(|chunk| chunk.get_cell(*x, *y))?;
+            
+            // Clone only for computation (small, temporary)
             let mut new_cell = cell.clone();
             climate::update_cell_climate(&mut new_cell, climate_ref, *world_pos);
-            (*chunk_x, *chunk_y, *x, *y, new_cell)
+            
+            Some(((*chunk_x, *chunk_y, *x, *y), new_cell))
         })
         .collect();
     
-    // Write back results (sequential, but fast)
-    for (chunk_x, chunk_y, x, y, new_cell) in updated_cells {
-        if let Some(cell) = world_grid.get_chunk_mut(chunk_x, chunk_y)
-            .and_then(|chunk| chunk.get_cell_mut(x, y)) {
-            *cell = new_cell;
+    // Phase 3: Store updates in buffer
+    for ((chunk_x, chunk_y, x, y), new_cell) in cell_updates {
+        update_buffer.update_buffer.insert((chunk_x, chunk_y, x, y), new_cell);
+    }
+    
+    // Phase 4: Apply all updates to world_grid (sequential, but fast)
+    for ((chunk_x, chunk_y, x, y), new_cell) in &update_buffer.update_buffer {
+        if let Some(cell) = world_grid
+            .get_chunk_mut(*chunk_x, *chunk_y)
+            .and_then(|chunk| chunk.get_cell_mut(*x, *y)) {
+            *cell = new_cell.clone(); // Final clone during write
         }
     }
 }
@@ -340,19 +366,24 @@ fn update_chunks(
 /// Step 10: PARALLELIZED - Processes chunks in parallel using rayon
 /// OPTIMIZED: Sparse updates - only process cells with resources or near organisms
 /// Step 8: Uses tuning parameters for ecosystem balance
+/// OPTIMIZED: Uses buffer to minimize cell cloning
 fn regenerate_and_decay_resources(
     mut world_grid: ResMut<WorldGrid>, 
     time: Res<Time>,
     dirty_chunks: Res<DirtyChunks>,
     tuning: Option<Res<crate::organisms::EcosystemTuning>>, // Step 8: Tuning parameters
+    mut update_buffer: ResMut<CellUpdateBuffer>, // Reuse same buffer
 ) {
     use rayon::prelude::*;
     
     let dt = time.delta_seconds();
     let chunk_coords: Vec<_> = world_grid.get_chunk_coords();
     let tuning_ref = tuning.as_deref();
+    
+    // Clear buffer but keep capacity
+    update_buffer.update_buffer.clear();
 
-    // Collect cells that need updating (read-only phase)
+    // Phase 1: Collect coordinates (read-only, parallel) - no cloning yet
     let cells_to_update: Vec<_> = chunk_coords
         .par_iter()
         .flat_map(|&(chunk_x, chunk_y)| {
@@ -370,7 +401,8 @@ fn regenerate_and_decay_resources(
                                     
                                     // Only update if cell has resources OR is active (near organisms)
                                     if has_resources || dirty_chunks.active_cells.contains(&((chunk_x, chunk_y), (x, y))) {
-                                        updates.push((chunk_x, chunk_y, x, y, cell.clone()));
+                                        // Store coordinates only, not cell data
+                                        updates.push((chunk_x, chunk_y, x, y));
                                     }
                                 }
                             }
@@ -382,23 +414,36 @@ fn regenerate_and_decay_resources(
         })
         .collect();
     
-    // Process updates in parallel
-    let updated_cells: Vec<_> = cells_to_update
+    // Phase 2: Process in parallel - read, compute, store in buffer
+    let cell_updates: Vec<_> = cells_to_update
         .par_iter()
-        .map(|(chunk_x, chunk_y, x, y, cell)| {
+        .filter_map(|(chunk_x, chunk_y, x, y)| {
+            // Read cell (immutable borrow) - clone only once for computation
+            let cell = world_grid
+                .get_chunk(*chunk_x, *chunk_y)
+                .and_then(|chunk| chunk.get_cell(*x, *y))?;
+            
+            // Clone only for computation
             let mut new_cell = cell.clone();
             resources::regenerate_resources(&mut new_cell, dt, tuning_ref);
             resources::decay_resources(&mut new_cell, dt, tuning_ref);
             resources::quantize_resources(&mut new_cell, 0.001);
-            (*chunk_x, *chunk_y, *x, *y, new_cell)
+            
+            Some(((*chunk_x, *chunk_y, *x, *y), new_cell))
         })
         .collect();
     
-    // Write back results (sequential, but fast)
-    for (chunk_x, chunk_y, x, y, new_cell) in updated_cells {
-        if let Some(cell) = world_grid.get_chunk_mut(chunk_x, chunk_y)
-            .and_then(|chunk| chunk.get_cell_mut(x, y)) {
-            *cell = new_cell;
+    // Phase 3: Store in buffer
+    for ((chunk_x, chunk_y, x, y), new_cell) in cell_updates {
+        update_buffer.update_buffer.insert((chunk_x, chunk_y, x, y), new_cell);
+    }
+    
+    // Phase 4: Apply to world_grid
+    for ((chunk_x, chunk_y, x, y), new_cell) in &update_buffer.update_buffer {
+        if let Some(cell) = world_grid
+            .get_chunk_mut(*chunk_x, *chunk_y)
+            .and_then(|chunk| chunk.get_cell_mut(*x, *y)) {
+            *cell = new_cell.clone();
         }
     }
 }

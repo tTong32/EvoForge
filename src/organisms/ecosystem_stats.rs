@@ -1,7 +1,7 @@
 use crate::organisms::components::*;
-use crate::organisms::genetics::{Genome, GENOME_SIZE};
+use crate::organisms::genetics::GENOME_SIZE;
 use crate::organisms::speciation::SpeciesTracker;
-use crate::world::cell::{Cell, TerrainType, RESOURCE_TYPE_COUNT};
+use crate::world::{TerrainType, RESOURCE_TYPE_COUNT};
 use crate::world::{WorldGrid, ClimateState};
 use bevy::prelude::*;
 use std::collections::{HashMap, VecDeque};
@@ -56,6 +56,18 @@ impl EnvironmentAggregate {
             ],
             sample_count: 0,
         }
+    }
+
+    /// Clear all samples but keep capacity (for reuse)
+    fn clear(&mut self) {
+        self.temperature_samples.clear();
+        self.humidity_samples.clear();
+        self.elevation_samples.clear();
+        self.terrain_counts.clear();
+        for resource_samples in &mut self.resource_samples {
+            resource_samples.clear();
+        }
+        self.sample_count = 0;
     }
 
     fn add_sample(
@@ -207,6 +219,10 @@ pub struct SpeciesFitnessLogger {
     header_written: bool,
     log_interval: u64,
     population_history: HashMap<u32, VecDeque<(u64, u32)>>, // species_id -> (tick, population)
+    // Reusable buffers to avoid allocations each frame
+    species_env_data_buffer: HashMap<u32, EnvironmentAggregate>,
+    species_env_stats_buffer: HashMap<u32, EnvironmentStats>,
+    population_growth_rates_buffer: HashMap<u32, f32>,
 }
 
 impl Default for SpeciesFitnessLogger {
@@ -229,6 +245,9 @@ impl Default for SpeciesFitnessLogger {
             header_written: false,
             log_interval: 50, // Log every 50 ticks
             population_history: HashMap::new(),
+            species_env_data_buffer: HashMap::new(),
+            species_env_stats_buffer: HashMap::new(),
+            population_growth_rates_buffer: HashMap::new(),
         }
     }
 }
@@ -263,12 +282,16 @@ pub fn log_species_fitness(
         return;
     }
 
-    // Aggregate environment data per species
-    let mut species_env_data: HashMap<u32, EnvironmentAggregate> = HashMap::new();
+    // Aggregate environment data per species - REUSE buffer
+    // Clear but keep capacity
+    for aggregate in logger.species_env_data_buffer.values_mut() {
+        aggregate.clear();
+    }
+    logger.species_env_data_buffer.clear();
 
     for (position, species_id) in organism_query.iter() {
         if let Some(cell) = world_grid.get_cell(position.x(), position.y()) {
-            let env = species_env_data
+            let env = logger.species_env_data_buffer
                 .entry(species_id.value())
                 .or_insert_with(EnvironmentAggregate::new);
             
@@ -282,14 +305,19 @@ pub fn log_species_fitness(
         }
     }
 
-    // Step 2: Calculate environment statistics for each species
-    let mut species_env_stats: HashMap<u32, EnvironmentStats> = HashMap::new();
-    for (species_id, aggregate) in species_env_data {
-        species_env_stats.insert(species_id, aggregate.calculate_stats());
+    // Step 2: Calculate environment statistics for each species - REUSE buffer
+    logger.species_env_stats_buffer.clear();
+    // Collect keys and aggregates first to avoid borrow checker issues
+    let species_data: Vec<(u32, EnvironmentStats)> = logger.species_env_data_buffer
+        .iter()
+        .map(|(species_id, aggregate)| (*species_id, aggregate.calculate_stats()))
+        .collect();
+    for (species_id, stats) in species_data {
+        logger.species_env_stats_buffer.insert(species_id, stats);
     }
 
-    // Step 3: Update population history and calculate growth rates
-    let mut population_growth_rates: HashMap<u32, f32> = HashMap::new();
+    // Step 3: Update population history and calculate growth rates - REUSE buffer
+    logger.population_growth_rates_buffer.clear();
     let current_tick = logger.tick_counter;
 
     for (species_id, &current_pop) in stats.population_by_species.iter() {
@@ -322,10 +350,77 @@ pub fn log_species_fitness(
             0.0
         };
         
-        population_growth_rates.insert(*species_id, growth_rate);
+        logger.population_growth_rates_buffer.insert(*species_id, growth_rate);
     }
 
-    // Step 4: Get writer and write CSV header if needed
+    // Step 4: Write header if needed, then get writer for data
+    if !logger.header_written {
+        // Write header in a separate scope to avoid borrow conflicts
+        {
+            let writer = match logger.ensure_writer() {
+                Some(w) => w,
+                None => {
+                    eprintln!("Failed to create CSV writer for species fitness logging");
+                    return;
+                }
+            };
+            
+            // Write CSV header
+            write!(writer, "tick,species_id,").unwrap();
+            
+            // Gene columns
+            for i in 0..GENOME_SIZE {
+                write!(writer, "gene_{},", i).unwrap();
+            }
+            
+            // Environment columns
+            write!(writer, "env_temp_avg,env_temp_min,env_temp_max,env_temp_std,").unwrap();
+            write!(writer, "env_humidity_avg,env_humidity_min,env_humidity_max,env_humidity_std,").unwrap();
+            write!(writer, "env_elevation_avg,env_elevation_min,env_elevation_max,").unwrap();
+            write!(writer, "terrain_ocean_pct,terrain_plains_pct,terrain_forest_pct,terrain_desert_pct,").unwrap();
+            write!(writer, "terrain_tundra_pct,terrain_mountain_pct,terrain_swamp_pct,terrain_volcanic_pct,").unwrap();
+            write!(writer, "resource_plant_avg,resource_mineral_avg,resource_sunlight_avg,").unwrap();
+            write!(writer, "resource_water_avg,resource_detritus_avg,resource_prey_avg,").unwrap();
+            
+            // Ecosystem columns
+            write!(writer, "ecosystem_total_population,ecosystem_species_count,").unwrap();
+            
+            // Fitness/label columns
+            write!(writer, "current_population,population_growth_rate\n").unwrap();
+        }
+        
+        // Mark header as written after writer is dropped
+        logger.header_written = true;
+    }
+    // Step 5: Write data for each species
+    let ecosystem_total_pop = stats.total_population;
+    let ecosystem_species_count = species_tracker.species_count();
+
+    // Get all species that have data
+    let all_species: Vec<u32> = stats.population_by_species.keys().copied().collect();
+
+    // Collect all data first to avoid borrow checker issues
+    let mut species_data = Vec::new();
+    for species_id in all_species {
+        // Get genome from tracker
+        let genome = match species_tracker.get_genome(species_id) {
+            Some(g) => (*g).clone(),
+            None => continue, // Skip species without genome data
+        };
+
+        // Get environment stats (default if species has no organisms in this tick)
+        let env_stats = logger.species_env_stats_buffer.get(&species_id)
+            .copied()
+            .unwrap_or_default();
+
+        // Get population data
+        let current_pop = stats.population_by_species.get(&species_id).copied().unwrap_or(0);
+        let growth_rate = logger.population_growth_rates_buffer.get(&species_id).copied().unwrap_or(0.0);
+
+        species_data.push((species_id, genome, env_stats, current_pop, growth_rate));
+    }
+
+    // Now get writer and write all data
     let writer = match logger.ensure_writer() {
         Some(w) => w,
         None => {
@@ -334,56 +429,7 @@ pub fn log_species_fitness(
         }
     };
 
-    if !logger.header_written {
-        // Write CSV header
-        write!(writer, "tick,species_id,").unwrap();
-        
-        // Gene columns
-        for i in 0..GENOME_SIZE {
-            write!(writer, "gene_{},", i).unwrap();
-        }
-        
-        // Environment columns
-        write!(writer, "env_temp_avg,env_temp_min,env_temp_max,env_temp_std,").unwrap();
-        write!(writer, "env_humidity_avg,env_humidity_min,env_humidity_max,env_humidity_std,").unwrap();
-        write!(writer, "env_elevation_avg,env_elevation_min,env_elevation_max,").unwrap();
-        write!(writer, "terrain_ocean_pct,terrain_plains_pct,terrain_forest_pct,terrain_desert_pct,").unwrap();
-        write!(writer, "terrain_tundra_pct,terrain_mountain_pct,terrain_swamp_pct,terrain_volcanic_pct,").unwrap();
-        write!(writer, "resource_plant_avg,resource_mineral_avg,resource_sunlight_avg,").unwrap();
-        write!(writer, "resource_water_avg,resource_detritus_avg,resource_prey_avg,").unwrap();
-        
-        // Ecosystem columns
-        write!(writer, "ecosystem_total_population,ecosystem_species_count,").unwrap();
-        
-        // Fitness/label columns
-        write!(writer, "current_population,population_growth_rate\n").unwrap();
-        
-        logger.header_written = true;
-    }
-
-    // Step 5: Write data for each species
-    let ecosystem_total_pop = stats.total_population;
-    let ecosystem_species_count = species_tracker.species_count();
-
-    // Get all species that have data
-    let all_species: Vec<u32> = stats.population_by_species.keys().copied().collect();
-
-    for species_id in all_species {
-        // Get genome from tracker
-        let genome = match species_tracker.get_genome(species_id) {
-            Some(g) => g,
-            None => continue, // Skip species without genome data
-        };
-
-        // Get environment stats (default if species has no organisms in this tick)
-        let env_stats = species_env_stats.get(&species_id)
-            .copied()
-            .unwrap_or_default();
-
-        // Get population data
-        let current_pop = stats.population_by_species.get(&species_id).copied().unwrap_or(0);
-        let growth_rate = population_growth_rates.get(&species_id).copied().unwrap_or(0.0);
-
+    for (species_id, genome, env_stats, current_pop, growth_rate) in species_data {
         // Write CSV row
         write!(writer, "{},{}", current_tick, species_id).unwrap();
         
