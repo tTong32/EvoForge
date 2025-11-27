@@ -5,7 +5,7 @@ from typing import Any, Tuple, List
 
 class DataLoader:
 
-    def __init__(self, logs_dir: str = "data/logs"):
+    def __init__(self, logs_dir: str = "../data/logs"):
         self.logs_dir = Path(logs_dir)
 
         # Map genes from genetics.rs file

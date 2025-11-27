@@ -6,6 +6,7 @@ from sklearn.decomposition import PCA
 import matplotlib.pyplot as plt
 import seaborn as sns
 from typing import List, Dict
+from pathlib import Path
 
 class EcosystemAnalyzer:
     """
@@ -17,7 +18,7 @@ class EcosystemAnalyzer:
     - What are the trade-offs?
     """
     
-    def __init__(self, X: pd.DataFrame, y: pd.Series, gene_names: Dict[int, str]):
+    def __init__(self, X: pd.DataFrame, y: pd.Series, gene_names: Dict[int, str], outputs_dir: str = "../data/outputs"):
         """
         Initialize analyzer.
         
@@ -25,10 +26,13 @@ class EcosystemAnalyzer:
             X: Features dataframe
             y: Fitness values
             gene_names: Gene index -> name mapping
+            outputs_dir: Directory to save output files
         """
         self.X = X
         self.y = y
         self.gene_names = gene_names
+        self.outputs_dir = Path(outputs_dir)
+        self.outputs_dir.mkdir(parents=True, exist_ok=True)
     
     def find_niches(self, n_clusters: int = 5) -> pd.DataFrame:
         """
@@ -91,21 +95,21 @@ class EcosystemAnalyzer:
             trait2: Name of second trait
         """
         if trait1 not in self.X.columns or trait2 not in self.X.columns:
-            print(f"⚠️  Traits not found: {trait1}, {trait2}")
+            print(f" Traits not found: {trait1}, {trait2}")
             return
         
         # Calculate correlation
         correlation = self.X[trait1].corr(self.X[trait2])
         
-        print(f"\n📊 Trade-off Analysis: {trait1} vs {trait2}")
+        print(f"\n Trade-off Analysis: {trait1} vs {trait2}")
         print(f"   Correlation: {correlation:.3f}")
         
         if correlation < -0.3:
-            print("   ✅ Strong trade-off (negative correlation)")
+            print("   Strong trade-off (negative correlation)")
         elif correlation > 0.3:
-            print("   ✅ Positive relationship (no trade-off)")
+            print("   Positive relationship (no trade-off)")
         else:
-            print("   ➖ Weak relationship")
+            print("   Weak relationship")
         
         # Plot
         plt.figure(figsize=(10, 6))
@@ -116,8 +120,11 @@ class EcosystemAnalyzer:
         plt.ylabel(trait2)
         plt.title(f'Trade-off: {trait1} vs {trait2}')
         plt.tight_layout()
-        plt.savefig(f'tradeoff_{trait1}_vs_{trait2}.png', dpi=150)
-        print(f"   💾 Saved plot to tradeoff_{trait1}_vs_{trait2}.png")
+        
+        # Save to outputs directory
+        plot_path = self.outputs_dir / f'tradeoff_{trait1}_vs_{trait2}.png'
+        plt.savefig(plot_path, dpi=150)
+        print(f"   Saved plot to {plot_path}")
     
     def find_optimal_genomes(self, environment: Dict[str, float], 
                             top_n: int = 10) -> pd.DataFrame:
@@ -131,7 +138,7 @@ class EcosystemAnalyzer:
         Returns:
             DataFrame of optimal genomes
         """
-        print(f"🎯 Finding optimal genomes for environment...")
+        print(f" Finding optimal genomes for environment...")
         
         # Filter data to similar environments
         # (This is simplified - you'd want more sophisticated matching)
