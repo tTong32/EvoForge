@@ -1,10 +1,10 @@
 use crate::world::cell::Cell;
 
-/// Size of a chunk in cells (e.g., 8x8 = 64 cells per chunk)
-pub const CHUNK_SIZE: usize = 8;
+/// Size of a chunk in cells (e.g., 4x4 = 16 cells per chunk)
+pub const CHUNK_SIZE: usize = 4;
 
-/// Size of a chunk in world units (fixed at 64x64)
-pub const CHUNK_WORLD_SIZE: f32 = 64.0;
+/// Size of a chunk in world units (fixed at 128x128)
+pub const CHUNK_WORLD_SIZE: f32 = 128.0;
 
 /// Size of each cell in world units (calculated from chunk size)
 pub const CELL_SIZE: f32 = CHUNK_WORLD_SIZE / CHUNK_SIZE as f32;

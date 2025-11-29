@@ -44,37 +44,6 @@ fn ensure_logs_directory() -> PathBuf {
     logs_dir
 }
 
-/// Resource to track which organism we're logging
-#[derive(Resource)]
-pub struct TrackedOrganism {
-    entity: Option<Entity>,
-    log_counter: u32,
-    csv_writer: Option<BufWriter<File>>,
-    csv_path: PathBuf,
-    header_written: bool,
-}
-
-// TRACKED ORGANISM LOGGING (UNUSED)
-impl Default for TrackedOrganism {
-    fn default() -> Self {
-        let logs_dir = ensure_logs_directory();
-
-        // Create CSV file with timestamp
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let csv_path = logs_dir.join(format!("organism_tracking_{}.csv", timestamp));
-
-        Self {
-            entity: None,
-            log_counter: 0,
-            csv_writer: None,
-            csv_path,
-            header_written: false,
-        }
-    }
-}
 
 /// Resource for bulk organism logging (UNUSED)
 #[derive(Resource)]
@@ -134,7 +103,6 @@ impl AllOrganismsLogger {
 /// Spawn initial organisms in the world (Step 8: Uses tuning parameters)
 pub fn spawn_initial_organisms(
     mut commands: Commands,
-    mut tracked: ResMut<TrackedOrganism>,
     mut species_tracker: ResMut<crate::organisms::speciation::SpeciesTracker>, // Step 8: Speciation
     tuning: Res<crate::organisms::EcosystemTuning>, // Step 8: Tuning parameters
     _world_grid: Res<WorldGrid>,
@@ -144,14 +112,12 @@ pub fn spawn_initial_organisms(
     let mut rng = fastrand::Rng::new();
     let spawn_count = tuning.initial_spawn_count;
     // Note: initial_species_count removed - using fixed value for now
-    let species_count = 3;
+    let species_count = tuning.initial_species_count;
 
     // Spawn organisms randomly within initialized chunks
     // Chunks are from -1 to 1
     let world_size = 3 * crate::world::CHUNK_SIZE as i32; // 3 chunks
     let spawn_range = world_size as f32 / 2.0; // -range to +range
-
-    let mut first_entity = None;
 
     let base_genomes: Vec<Genome> = (0..species_count)
         .map(|_| Genome::random())
@@ -214,29 +180,7 @@ pub fn spawn_initial_organisms(
                 ))
                 .id();
 
-            // Track the first organism spawned
-            if species_idx == 0 && org_idx == 0 {
-                first_entity = Some(entity);
-            }
         }
-    }
-
-    // TRACKED ORGANISM LOGGING
-    // Set the first organism as the tracked one
-    if let Some(entity) = first_entity {
-        tracked.entity = Some(entity);
-
-        // Initialize CSV writer
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&tracked.csv_path)
-            .expect("Failed to open CSV file for writing");
-        tracked.csv_writer = Some(BufWriter::new(file));
-
-        info!("[TRACKED] Started tracking organism entity: {:?}", entity);
-        info!("[TRACKED] CSV logging to: {}", tracked.csv_path.display());
-        info!("[TRACKED] Logging will begin after 10 ticks...");
     }
 
     info!("Spawned {} organisms", spawn_count);
@@ -415,6 +359,157 @@ pub struct BehvaiourUpdateBuffer {
     entity_data: Vec<(Entity, Position, Energy, CachedTraits, SpeciesId, OrganismType, Size)>,
 }
 
+/// Cell coordinate for identifying a specific cell in the world grid
+/// Uses chunk coordinates and local cell coordinates for efficient hashing
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct CellCoordinate {
+    chunk_x: i32,
+    chunk_y: i32,
+    local_x: usize,
+    local_y: usize,
+}
+
+impl CellCoordinate {
+    fn from_world_pos(world_x: f32, world_y: f32) -> Self {
+        use crate::world::Chunk;
+        
+        let (chunk_x, chunk_y) = Chunk::world_to_chunk(world_x, world_y);
+        let (local_x, local_y) = Chunk::world_to_local(world_x, world_y);
+        
+        Self {
+            chunk_x,
+            chunk_y,
+            local_x,
+            local_y,
+        }
+    }
+    
+    fn world_x(&self) -> f32 {
+        use crate::world::{CHUNK_WORLD_SIZE, CELL_SIZE};
+        (self.chunk_x as f32 * CHUNK_WORLD_SIZE) + (self.local_x as f32 * CELL_SIZE) + (CELL_SIZE / 2.0)
+    }
+    
+    fn world_y(&self) -> f32 {
+        use crate::world::{CHUNK_WORLD_SIZE, CELL_SIZE};
+        (self.chunk_y as f32 * CHUNK_WORLD_SIZE) + (self.local_y as f32 * CELL_SIZE) + (CELL_SIZE / 2.0)
+    }
+}
+
+/// Plant consumption data for a single organism
+#[derive(Debug, Clone)]
+struct PlantConsumption {
+    /// Total fraction of plants eaten (0.0-1.0)
+    total_fraction_eaten: f32,
+    /// Per-species consumption (species_id -> fraction_eaten)
+    species_consumption: HashMap<u32, f32>,
+}
+
+/// Cell modifications collected from organisms during eating
+#[derive(Debug, Default, Clone)]
+struct CellModification {
+    /// Energy that should be gained by each organism consuming from this cell
+    /// Maps entity -> energy gained
+    organism_energy_gains: HashMap<Entity, f32>,
+    
+    /// Plant consumption aggregations
+    plant_consumption: Option<PlantConsumption>,
+    
+    /// Resource deltas per resource type [Plant, Mineral, Sunlight, Water, Detritus, Prey]
+    resource_deltas: [f32; 6],
+    
+    /// Pressure deltas per resource type (additive)
+    pressure_deltas: [f32; 6],
+    
+    /// Animal nutrient delta (from dead organisms)
+    animal_nutrient_delta: f32,
+}
+
+impl CellModification {
+    fn new() -> Self {
+        Self {
+            organism_energy_gains: HashMap::new(),
+            plant_consumption: None,
+            resource_deltas: [0.0; 6],
+            pressure_deltas: [0.0; 6],
+            animal_nutrient_delta: 0.0,
+        }
+    }
+    
+    /// Merge another modification into this one (for aggregating multiple organisms)
+    fn merge(&mut self, other: CellModification) {
+        // Merge energy gains
+        for (entity, energy) in other.organism_energy_gains {
+            *self.organism_energy_gains.entry(entity).or_insert(0.0) += energy;
+        }
+        
+        // Merge plant consumption
+        if let Some(other_plant) = other.plant_consumption {
+            if let Some(ref mut plant) = self.plant_consumption {
+                plant.total_fraction_eaten += other_plant.total_fraction_eaten;
+                for (species_id, fraction) in other_plant.species_consumption {
+                    *plant.species_consumption.entry(species_id).or_insert(0.0) += fraction;
+                }
+            } else {
+                self.plant_consumption = Some(other_plant);
+            }
+        }
+        
+        // Merge resource deltas (additive for most, but need to be careful about bounds)
+        for i in 0..6 {
+            self.resource_deltas[i] += other.resource_deltas[i];
+        }
+        
+        // Merge pressure deltas (additive)
+        for i in 0..6 {
+            self.pressure_deltas[i] += other.pressure_deltas[i];
+        }
+        
+        // Merge animal nutrients
+        self.animal_nutrient_delta += other.animal_nutrient_delta;
+    }
+}
+
+/// Buffer for collecting cell modifications before applying them
+#[derive(Resource, Default)]
+pub struct CellModificationsBuffer {
+    /// Maps cell coordinates to their modifications
+    modifications: HashMap<CellCoordinate, CellModification>,
+    /// Energy gains per organism (extracted for easy access)
+    organism_energy_gains: HashMap<Entity, f32>,
+}
+
+impl CellModificationsBuffer {
+    fn clear(&mut self) {
+        // Clear modifications but keep HashMap capacity
+        self.modifications.clear();
+        self.organism_energy_gains.clear();
+    }
+    
+    fn add_modification(&mut self, coord: CellCoordinate, modification: CellModification) {
+        // Extract energy gains before merging
+        for (entity, energy) in modification.organism_energy_gains.iter() {
+            *self.organism_energy_gains.entry(*entity).or_insert(0.0) += energy;
+        }
+        
+        // Create modification without energy gains for cell updates
+        let mut cell_mod = modification.clone();
+        cell_mod.organism_energy_gains.clear();
+        
+        self.modifications
+            .entry(coord)
+            .or_insert_with(CellModification::new)
+            .merge(cell_mod);
+    }
+    
+    fn take_modifications(&mut self) -> HashMap<CellCoordinate, CellModification> {
+        std::mem::take(&mut self.modifications)
+    }
+    
+    fn take_energy_gains(&mut self) -> HashMap<Entity, f32> {
+        std::mem::take(&mut self.organism_energy_gains)
+    }
+}
+
 /// Update behavior decisions based on sensory input and organism state
 pub fn update_behavior(
     mut query: Query<
@@ -565,11 +660,9 @@ pub fn update_movement(
         With<Alive>,
     >,
     time: Res<Time>,
-    tracked: ResMut<TrackedOrganism>,
 ) {
     let dt = time.delta_seconds();
     let time_elapsed = time.elapsed_seconds();
-    let tracked_entity = tracked.entity; // Capture once to avoid repeated access
 
     // Optimization: Parallel iteration for independent position/velocity updates
     query.par_iter_mut().for_each(|(mut position, mut velocity, behavior, energy, cached_traits, organism_type, entity)| {
@@ -587,6 +680,7 @@ pub fn update_movement(
             *organism_type,
             energy,
             time_elapsed,
+            entity.index() as u64, // Entity ID for pseudo-random variation
         );
 
         // Smooth velocity transitions (lerp for smoother movement)
@@ -605,33 +699,139 @@ pub fn update_movement(
         let max_pos = 200.0;
         position.0.x = position.0.x.clamp(-max_pos, max_pos);
         position.0.y = position.0.y.clamp(-max_pos, max_pos);
-
-        // Log behavior changes for tracked entity (only in sequential part)
-        if tracked_entity == Some(entity) && behavior.state_time < dt * 2.0 {
-            // Note: info! logging in parallel context - consider moving to separate system
-            // For now, we'll skip logging in parallel iteration to avoid contention
-        }
     });
+}
+
+/// Calculate what an organism would consume from a cell (read-only operation)
+/// Returns a CellModification that can be applied later
+fn calculate_consumption_modification(
+    cell: &crate::world::Cell,
+    entity: Entity,
+    organism_type: &OrganismType,
+    size: &Size,
+    traits_opt: Option<&CachedTraits>,
+    plant_consumption_rate: f32,
+    meat_consumption_rate: f32,
+    dt: f32,
+    energy_conversion_efficiency: f32,
+) -> Option<CellModification> {
+    let mut modification = CellModification::new();
     
-    // Sequential logging for tracked entity (if needed)
-    if let Some(tracked_entity) = tracked_entity {
-        if let Ok((_, _, behavior, _, _, _, _)) = query.get(tracked_entity) {
-            if behavior.state_time < dt * 2.0 {
-                if let Ok((_, velocity, _, _, _, _, _)) = query.get(tracked_entity) {
-                    info!(
-                        "[TRACKED] Behavior: {:?}, Velocity: ({:.2}, {:.2}), Speed: {:.2}",
-                        behavior.state,
-                        velocity.0.x,
-                        velocity.0.y,
-                        velocity.0.length()
-                    );
+    match organism_type {
+        OrganismType::Consumer => {
+            // Calculate plant consumption
+            let max_fraction = (plant_consumption_rate * dt).min(1.0);
+            let mut remaining_fraction = max_fraction;
+            let mut total_eaten = 0.0;
+            
+            if !cell.plant_community.is_empty() && remaining_fraction > 0.0 {
+                let mut species_consumption = HashMap::new();
+                
+                // Calculate what would be eaten (without modifying)
+                for species in cell.plant_community.iter() {
+                    if remaining_fraction <= 0.0 {
+                        break;
+                    }
+                    let bite = species.percentage.min(remaining_fraction);
+                    remaining_fraction -= bite;
+                    total_eaten += bite;
+                    
+                    if bite > 0.0 {
+                        species_consumption.insert(species.species_id, bite);
+                    }
+                }
+                
+                if total_eaten > 0.0 {
+                    modification.plant_consumption = Some(PlantConsumption {
+                        total_fraction_eaten: total_eaten,
+                        species_consumption,
+                    });
+                    
+                    // Calculate energy from plants
+                    let plant_energy = total_eaten * size.value() * energy_conversion_efficiency;
+                    modification.organism_energy_gains.insert(entity, plant_energy);
                 }
             }
+            
+            // Calculate prey resource consumption
+            let current_prey = cell.get_resource(ResourceType::Prey);
+            let prey_resource = current_prey.min(meat_consumption_rate * dt);
+            
+            if prey_resource > 0.0 {
+                modification.resource_deltas[ResourceType::Prey as usize] = -prey_resource;
+                modification.pressure_deltas[ResourceType::Prey as usize] = prey_resource;
+                
+                let prey_energy = prey_resource * 2.0 * energy_conversion_efficiency;
+                *modification.organism_energy_gains.entry(entity).or_insert(0.0) += prey_energy;
+            }
+            
+            Some(modification)
         }
+        _ => None, // Other organism types don't consume from cells in this system
+    }
+}
+
+/// Apply cell modifications to the actual cell
+fn apply_cell_modifications(
+    cell: &mut crate::world::Cell,
+    modification: &CellModification,
+) {
+    // Apply plant consumption
+    if let Some(ref plant_consumption) = modification.plant_consumption {
+        if !cell.plant_community.is_empty() && plant_consumption.total_fraction_eaten > 0.0 {
+            // Apply consumption to each species
+            for species in cell.plant_community.iter_mut() {
+                if let Some(&fraction_eaten) = plant_consumption.species_consumption.get(&species.species_id) {
+                    species.percentage = (species.percentage - fraction_eaten).max(0.0);
+                }
+            }
+            
+            // Remove species with zero or negative percentages
+            cell.plant_community.retain(|s| s.percentage > 0.0);
+            
+            // Normalize plant community percentages
+            let sum: f32 = cell.plant_community.iter().map(|s| s.percentage).sum();
+            if sum > 0.0 {
+                let inv = 1.0 / sum;
+                cell.plant_community.iter_mut().for_each(|s| s.percentage *= inv);
+            } else {
+                cell.plant_community.clear();
+            }
+        }
+    }
+    
+    // Apply resource deltas
+    for i in 0..6 {
+        if modification.resource_deltas[i] != 0.0 {
+            let current = cell.resource_density[i];
+            cell.resource_density[i] = (current + modification.resource_deltas[i]).max(0.0);
+        }
+    }
+    
+    // Apply pressure deltas
+    for i in 0..6 {
+        if modification.pressure_deltas[i] > 0.0 {
+            let resource_type = match i {
+                0 => ResourceType::Plant,
+                1 => ResourceType::Mineral,
+                2 => ResourceType::Sunlight,
+                3 => ResourceType::Water,
+                4 => ResourceType::Detritus,
+                5 => ResourceType::Prey,
+                _ => continue,
+            };
+            cell.add_pressure(resource_type, modification.pressure_deltas[i]);
+        }
+    }
+    
+    // Apply animal nutrient delta
+    if modification.animal_nutrient_delta > 0.0 {
+        cell.animal_nutrients += modification.animal_nutrient_delta;
     }
 }
 
 /// Handle eating behavior - consume resources or prey (Step 8: Uses tuning parameters)
+/// OPTIMIZED: Split into collection and application phases for better performance
 pub fn handle_eating(
     mut query: Query<
         (
@@ -641,6 +841,7 @@ pub fn handle_eating(
             &Behavior,
             &OrganismType,
             &Size,
+            &SpeciesId,
             Option<&CachedTraits>,
             Option<&mut PredatorFeeding>,
         ),
@@ -651,6 +852,7 @@ pub fn handle_eating(
     mut damage_writer: EventWriter<PredationDamageEvent>,
     time: Res<Time>,
     mut eligible_children: ResMut<EligibleChildrenSet>, // Optimization: reuse HashSet
+    mut cell_mod_buffer: ResMut<CellModificationsBuffer>, // Optimization: batch cell modifications
     mut param_set: ParamSet<(
         Query<
             (
@@ -667,17 +869,19 @@ pub fn handle_eating(
     let dt = time.delta_seconds();
     let energy_conversion_efficiency = tuning.energy_conversion_efficiency;
 
-    for (entity, position, mut energy, behavior, organism_type, size, traits_opt, feeding_opt) in
+    // Clear modification buffer from previous frame
+    cell_mod_buffer.clear();
+
+    // PHASE 1: COLLECTION - Collect all cell modifications without mutating cells
+    // Also handle non-cell modifications (carcass feeding, predation)
+    for (entity, position, mut energy, behavior, organism_type, size, species_id, traits_opt, feeding_opt) in
         query.iter_mut()
     {
         if behavior.state != BehaviorState::Eating {
             continue;
         }
 
-        // Get current cell
-               // Get current cell
-        if let Some(cell) = world_grid.get_cell_mut(position.x(), position.y()) {
-            // Hard capped per-organism consumption rate (Phase 2).
+        // Hard capped per-organism consumption rate
         let plant_consumption_rate = traits_opt
             .map(|t| t.plant_consumption_rate)
             .unwrap_or(tuning.plant_consumption_rate_base);
@@ -685,95 +889,112 @@ pub fn handle_eating(
             .map(|t| t.meat_consumption_rate)
             .unwrap_or(tuning.meat_consumption_rate_base);
 
-            let consumed = match organism_type {
-                OrganismType::Consumer => {
-                    // Consumers eat plant percentages (herbivory),
-                    // attack live prey, and can feed on carcasses over multiple ticks.
-
-                    // 1) If we have a carcass to feed on, prioritize that.
-                    if let Some(mut feeding) = feeding_opt {
-                        let max_intake = (meat_consumption_rate * dt).min(feeding.remaining_energy);
-                        if max_intake > 0.0 {
-                            feeding.remaining_energy -= max_intake;
-                            let gained = max_intake * energy_conversion_efficiency;
-                            energy.current = (energy.current + gained).min(energy.max);
-                        }
-
-                        // While feeding, skip other food sources.
-                        continue;
+        match organism_type {
+            OrganismType::Consumer => {
+                // 1) Carcass feeding - doesn't modify cells, handle immediately
+                if let Some(mut feeding) = feeding_opt {
+                    let max_intake = (meat_consumption_rate * dt).min(feeding.remaining_energy);
+                    if max_intake > 0.0 {
+                        feeding.remaining_energy -= max_intake;
+                        let gained = max_intake * energy_conversion_efficiency;
+                        energy.current = (energy.current + gained).min(energy.max);
+                        
+                        // Log eating from carcass
+                        info!(
+                            "[EATING] Entity {} (Species {}) ate {:.2} energy from carcass | Energy: {:.2}/{:.2}",
+                            entity.index(),
+                            species_id.value(),
+                            gained,
+                            energy.current,
+                            energy.max
+                        );
                     }
-
-                    // 2) If we have a prey target entity, apply damage (RPG-style attack).
-                    if let Some(prey_entity) = behavior.target_entity {
-                        if let Some(traits) = traits_opt {
-                            let damage = traits.attack_strength * dt;
-                            if damage > 0.0 {
-                                damage_writer.send(PredationDamageEvent {
-                                    predator: entity,
-                                    prey: prey_entity,
-                                    damage,
-                                });
-                            }
-                        }
-                    }
-
-                    // Herbivory: consume a capped fraction of plant community.
-                    let max_fraction = (plant_consumption_rate * dt).min(1.0);
-                    let mut remaining_fraction = max_fraction;
-                    let mut eaten_fraction = 0.0;
-
-                    if !cell.plant_community.is_empty() && remaining_fraction > 0.0 {
-                        for species in cell.plant_community.iter_mut() {
-                            if remaining_fraction <= 0.0 {
-                                break; // Stop when done eating
-                            }
-                            let bite = species.percentage.min(remaining_fraction);
-                            species.percentage -= bite;
-                            remaining_fraction -= bite;
-                            eaten_fraction += bite;
-                        }
-
-                        // Calculate sum after eating for normalization
-                        let sum_after_eating: f32 = cell.plant_community.iter()
-                            .map(|s| s.percentage)
-                            .sum();
-
-                        // Normalize after grazing to ensure percentages sum to 1.0
-                        if sum_after_eating > 0.0 {
-                            let inv = 1.0 / sum_after_eating;
-                            cell.plant_community.iter_mut().for_each(|s| s.percentage *= inv);
-                        } else {
-                            // All plants eaten - clear community
-                            cell.plant_community.clear();
-                        }
-                    }
-
-                    // Simple mapping from eaten plant fraction to energy.
-                    let plant_energy =
-                        eaten_fraction * size.value() * energy_conversion_efficiency;
-
-                    // Legacy prey scalar resource (will be replaced).
-                    let current_prey = cell.get_resource(ResourceType::Prey);
-                    let prey_resource = current_prey.min(meat_consumption_rate * dt);
-
-                    cell.set_resource(
-                        ResourceType::Prey,
-                        current_prey - prey_resource,
-                    );
-                    cell.add_pressure(ResourceType::Prey, prey_resource);
-
-                    let prey_energy = prey_resource * 2.0 * energy_conversion_efficiency;
-                    plant_energy + prey_energy
+                    // While feeding from carcass, skip other food sources
+                    continue;
                 }
-            };
 
-            // Add energy (clamped to max) and handle meal sharing with attached children.
-            let mut parent_energy_gain = consumed;
+                // 2) Predation attacks - send events, don't modify cells
+                if let Some(prey_entity) = behavior.target_entity {
+                    if let Some(traits) = traits_opt {
+                        let damage = traits.attack_strength * dt;
+                        if damage > 0.0 {
+                            damage_writer.send(PredationDamageEvent {
+                                predator: entity,
+                                prey: prey_entity,
+                                damage,
+                            });
+                            
+                            // Log predation attack
+                            info!(
+                                "[EATING] Entity {} (Species {}) attacked prey {} | Damage: {:.2}",
+                                entity.index(),
+                                species_id.value(),
+                                prey_entity.index(),
+                                damage
+                            );
+                        }
+                    }
+                }
 
+                // 3) Cell resource consumption - collect modifications for batching
+                if let Some(cell) = world_grid.get_cell(position.x(), position.y()) {
+                    let cell_coord = CellCoordinate::from_world_pos(position.x(), position.y());
+                    
+                    if let Some(modification) = calculate_consumption_modification(
+                        cell,
+                        entity,
+                        organism_type,
+                        size,
+                        traits_opt,
+                        plant_consumption_rate,
+                        meat_consumption_rate,
+                        dt,
+                        energy_conversion_efficiency,
+                    ) {
+                        cell_mod_buffer.add_modification(cell_coord, modification);
+                    }
+                }
+            }
+        }
+    }
+
+    // PHASE 2: APPLICATION - Apply all collected modifications to cells
+    let modifications = cell_mod_buffer.take_modifications();
+    
+    for (cell_coord, modification) in modifications {
+        if let Some(cell) = world_grid.get_cell_mut(cell_coord.world_x(), cell_coord.world_y()) {
+            apply_cell_modifications(cell, &modification);
+        }
+    }
+
+    // PHASE 3: ENERGY APPLICATION - Apply energy gains to organisms
+    let energy_gains = cell_mod_buffer.take_energy_gains();
+    
+    for (entity, _position, mut energy, behavior, organism_type, _size, species_id, traits_opt, _feeding_opt) in
+        query.iter_mut()
+    {
+        if behavior.state != BehaviorState::Eating {
+            continue;
+        }
+
+        if let Some(&energy_gain) = energy_gains.get(&entity) {
+            // Log eating from cell resources
+            if energy_gain > 0.0 {
+                info!(
+                    "[EATING] Entity {} (Species {}) consumed {:.2} energy from resources | Energy: {:.2}/{:.2}",
+                    entity.index(),
+                    species_id.value(),
+                    energy_gain,
+                    energy.current,
+                    energy.max
+                );
+            }
+            
+            let mut parent_energy_gain = energy_gain;
+
+            // Handle meal sharing with attached children
             if let (OrganismType::Consumer, Some(traits)) = (organism_type, traits_opt) {
                 if traits.meal_share_percentage > 0.0 {
-                    // Optimized: Single pass to collect eligible children, then apply sharing with O(1) lookup
-                    // Use reusable HashSet resource to avoid allocation
                     eligible_children.clear();
                     param_set.p0().for_each(|(child_entity, attachment, _child_energy, _child_growth, child_age)| {
                         if attachment.parent == entity 
@@ -784,10 +1005,10 @@ pub fn handle_eating(
 
                     if !eligible_children.is_empty() {
                         let child_count = eligible_children.len() as f32;
-                        let share_total = consumed * traits.meal_share_percentage;
+                        let share_total = energy_gain * traits.meal_share_percentage;
                         let per_child = share_total / child_count;
 
-                        // Apply energy sharing to collected children (O(1) lookup with HashSet)
+                        // Apply energy sharing to collected children
                         param_set.p0().for_each_mut(|(child_entity, _attachment, mut child_energy, _child_growth, _child_age)| {
                             if eligible_children.contains(&child_entity) {
                                 child_energy.current =
@@ -954,6 +1175,8 @@ pub fn handle_reproduction(
             let total_energy_cost = per_child_energy * count;
             parent_energy.current = (available_energy - total_energy_cost).max(0.0);
 
+            // Capture offspring count before moving event.genomes
+            let offspring_count = event.genomes.len();
             let mut spawned_species = None;
             for offspring_genome in event.genomes {
                 let cached = CachedTraits::from_genome(&offspring_genome);
@@ -1040,18 +1263,17 @@ pub fn handle_reproduction(
 
             parent_cooldown.reset(parent_traits.reproduction_cooldown.max(1.0) as u32);
             
-            // Step 8: Log species information on reproduction
+            // Log reproduction
             if let Some(species) = spawned_species {
-                let species_count = species_tracker.species_count();
-                if count as u32 % 10 == 0 || species_count <= 5 {
-                    // Log every 10th reproduction or when few species exist
-                    info!(
-                        "[REPRODUCTION] Spawned {} offspring | Species: {} (parent: {})",
-                        count as u32,
-                        species_count,
-                        species.value()
-                    );
-                }
+                info!(
+                    "[REPRODUCTION] Entity {} (Species {}) reproduced | Offspring: {} | Type: {:?} | Position: ({:.1}, {:.1})",
+                    event.parent.index(),
+                    species.value(),
+                    offspring_count,
+                    event.organism_type,
+                    event.position.x,
+                    event.position.y
+                );
             }
         }
     }
@@ -1061,7 +1283,7 @@ pub fn handle_reproduction(
 pub fn apply_predation_damage(
     mut commands: Commands,
     mut events: EventReader<PredationDamageEvent>,
-    mut prey_query: Query<(Entity, &mut Energy, &Size, &SpeciesId), With<Alive>>,
+    mut prey_query: Query<(Entity, &mut Energy, &Size, &SpeciesId, &OrganismType), With<Alive>>,
     mut predator_feeding_query: Query<&mut PredatorFeeding>,
     mut predator_learning_query: Query<&mut IndividualLearning>,
     predator_traits_query: Query<&CachedTraits, With<Alive>>,
@@ -1081,7 +1303,7 @@ pub fn apply_predation_damage(
     // Process attacks - iterate over mutable entries to avoid taking ownership
     // This preserves HashMap capacity and avoids reallocation
     for (prey_entity, attacks) in grouping.attacks_by_prey.iter_mut() {
-        if let Ok((_, mut energy, size, species_id)) = prey_query.get_mut(*prey_entity) {
+        if let Ok((_, mut energy, size, species_id, organism_type)) = prey_query.get_mut(*prey_entity) {
             if energy.current <= 0.0 {
                 continue;
             }
@@ -1120,6 +1342,15 @@ pub fn apply_predation_damage(
             energy.current = (energy.current - total_damage).max(0.0);
 
             if before > 0.0 && energy.current <= 0.0 {
+                // Log when prey gets eaten
+                info!(
+                    "[EATEN] Entity {} (Species {}, Type: {:?}) was killed by predation | Size: {:.2}",
+                    prey_entity.index(),
+                    species_id.value(),
+                    organism_type,
+                    size.value()
+                );
+                
                 // Prey died from this coordinated attack: create a shared carcass.
                 let carcass_energy_total = size.value().max(0.1) * 8.0;
                 let share_per_pred = carcass_energy_total / pack_size.max(1.0);
@@ -1140,9 +1371,12 @@ pub fn apply_predation_damage(
                 }
 
                 // Mark prey as killed by predation for death handling.
-                commands
-                    .entity(*prey_entity)
-                    .insert(crate::organisms::components::KilledByPredation);
+                // Verify entity still exists before inserting (it might have been despawned)
+                if prey_query.get(*prey_entity).is_ok() {
+                    commands
+                        .entity(*prey_entity)
+                        .insert(crate::organisms::components::KilledByPredation);
+                }
             }
         }
     }
@@ -1204,10 +1438,9 @@ pub fn update_parent_child_learning(
 /// Handle organism death (remove entities with zero energy)
 pub fn handle_death(
     mut commands: Commands,
-    mut tracked: ResMut<TrackedOrganism>,
     mut spatial_hash: ResMut<SpatialHashGrid>,
     mut world_grid: ResMut<WorldGrid>,
-    query: Query<(Entity, &Energy, &Position, &Size), (With<Alive>, Without<crate::organisms::components::ParentalAttachment>)>,
+    query: Query<(Entity, &Energy, &Position, &Size, &SpeciesId, &OrganismType), (With<Alive>, Without<crate::organisms::components::ParentalAttachment>)>,
     mut children_query: Query<
         (
             Entity,
@@ -1221,7 +1454,7 @@ pub fn handle_death(
     >,
     mut predation_flags: Query<&mut crate::organisms::components::KilledByPredation>,
 ) {
-    for (entity, energy, position, size) in query.iter() {
+    for (entity, energy, position, size, species_id, organism_type) in query.iter() {
         if energy.is_dead() {
             // Add nutrients to the cell from animal biomass.
             if let Some(cell) = world_grid.get_cell_mut(position.x(), position.y()) {
@@ -1229,17 +1462,28 @@ pub fn handle_death(
                 cell.animal_nutrients += biomass * 0.05;
             }
 
-            if tracked.entity == Some(entity) {
-                info!(
-                    "[TRACKED] Organism died! Final energy: {:.2}",
-                    energy.current
-                );
-                tracked.entity = None; // Clear tracking
-            }
-            info!("Organism died at energy level: {:.2}", energy.current);
+            // Determine cause of death
+            let killed_by_predation = predation_flags.get_mut(entity).is_ok();
+            let cause = if killed_by_predation {
+                "predation"
+            } else {
+                "starvation/exhaustion"
+            };
+            
+            // Log death
+            info!(
+                "[DEATH] Entity {} (Species {}, Type: {:?}) died from {} | Position: ({:.1}, {:.1}), Size: {:.2}, Final Energy: {:.2}",
+                entity.index(),
+                species_id.value(),
+                organism_type,
+                cause,
+                position.x(),
+                position.y(),
+                size.value(),
+                energy.current
+            );
 
             // Handle attached children depending on cause of death.
-            let killed_by_predation = predation_flags.get_mut(entity).is_ok();
             for (child_entity, mut attachment, mut child_energy, child_traits, mut rel, child_pos) in
                 children_query.iter_mut()
             {
@@ -1452,218 +1696,3 @@ pub fn log_all_organisms(
     }
 }
 
-/// Log tracked organism information periodically
-pub fn log_tracked_organism(
-    tracked: ResMut<TrackedOrganism>,
-    query: Query<
-        (
-            Entity,
-            &Position,
-            &Velocity,
-            &Energy,
-            &Age,
-            &Size,
-            &OrganismType,
-            &Behavior,
-            &CachedTraits,
-        ),
-        With<Alive>,
-    >,
-) {
-    let mut tracked_mut = tracked;
-    tracked_mut.log_counter += 1;
-
-    // default cadence: every 10 ticks
-    if tracked_mut.log_counter % 10 != 0 {
-        return;
-    }
-
-    if let Some(entity) = tracked_mut.entity {
-        if let Ok((
-            _entity,
-            position,
-            velocity,
-            energy,
-            age,
-            size,
-            org_type,
-            behavior,
-            cached_traits,
-        )) = query.get(entity)
-        {
-            let speed = velocity.0.length();
-            // Optimized: Use match instead of format! to avoid string allocation
-            let behavior_state = match behavior.state {
-                crate::organisms::behavior::BehaviorState::Wandering => "Wandering",
-                crate::organisms::behavior::BehaviorState::Chasing => "Chasing",
-                crate::organisms::behavior::BehaviorState::Eating => "Eating",
-                crate::organisms::behavior::BehaviorState::Fleeing => "Fleeing",
-                crate::organisms::behavior::BehaviorState::Mating => "Mating",
-                crate::organisms::behavior::BehaviorState::Resting => "Resting",
-                crate::organisms::behavior::BehaviorState::Migrating => "Migrating",
-            };
-            let sensory_range = cached_traits.sensory_range;
-            let aggression = cached_traits.aggression;
-            let boldness = cached_traits.boldness;
-            let mutation_rate = cached_traits.mutation_rate;
-
-            let target_info = if let Some(target_pos) = behavior.target_position {
-                format!("({:.1}, {:.1})", target_pos.x, target_pos.y)
-            } else {
-                "None".to_string()
-            };
-
-            info!(
-                "[TRACKED ORGANISM] Tick: {} | Pos: ({:.2}, {:.2}) | Vel: ({:.2}, {:.2}) | Speed: {:.2} | Energy: {:.2}/{:.2} ({:.1}%) | Age: {} | Size: {:.2} | Type: {:?} | Behavior: {} | StateTime: {:.1}s | Target: {} | SensoryRange: {:.1} | Aggression: {:.2} | Boldness: {:.2} | MutationRate: {:.4}",
-                tracked_mut.log_counter,
-                position.0.x,
-                position.0.y,
-                velocity.0.x,
-                velocity.0.y,
-                speed,
-                energy.current,
-                energy.max,
-                energy.ratio() * 100.0,
-                age.0,
-                size.value(),
-                org_type,
-                behavior_state,
-                behavior.state_time,
-                target_info,
-                sensory_range,
-                aggression,
-                boldness,
-                mutation_rate,
-            );
-
-            let needs_header = !tracked_mut.header_written;
-            let tick = tracked_mut.log_counter;
-
-            if let Some(ref mut writer) = tracked_mut.csv_writer {
-                if needs_header {
-                    writeln!(
-                        writer,
-                        "tick,position_x,position_y,velocity_x,velocity_y,speed,energy_current,energy_max,energy_ratio,age,size,organism_type,behavior_state,state_time,target_x,target_y,target_entity,sensory_range,aggression,boldness,mutation_rate,foraging_drive,risk_tolerance,exploration_drive,clutch_size,offspring_energy_share,hunger_memory,threat_timer,resource_selectivity,migration_target_x,migration_target_y,migration_active"
-                    )
-                    .expect("Failed to write CSV header");
-                }
-
-                let (target_x, target_y) = if let Some(target_pos) = behavior.target_position {
-                    (target_pos.x, target_pos.y)
-                } else {
-                    (f32::NAN, f32::NAN)
-                };
-                // Optimized: Format target_entity directly to avoid string allocation
-                let target_entity_index = behavior.target_entity.map(|e| e.index());
-                let (migration_x, migration_y) = behavior
-                    .migration_target
-                    .or(behavior.target_position)
-                    .map(|pos| (pos.x, pos.y))
-                    .unwrap_or((f32::NAN, f32::NAN));
-                let migration_active = if behavior.state == BehaviorState::Migrating
-                    || behavior.migration_target.is_some()
-                {
-                    1u8
-                } else {
-                    0u8
-                };
-
-                // Format target_entity directly to avoid string allocation
-                match target_entity_index {
-                    Some(idx) => {
-                        writeln!(
-                            writer,
-                            "{tick},{pos_x:.6},{pos_y:.6},{vel_x:.6},{vel_y:.6},{speed:.6},{energy_current:.6},{energy_max:.6},{energy_ratio:.6},{age},{size:.6},{organism_type:?},{behavior_state},{state_time:.6},{target_x:.6},{target_y:.6},{target_entity},{sensory_range:.6},{aggression:.6},{boldness:.6},{mutation_rate:.6},{foraging_drive:.6},{risk_tolerance:.6},{exploration_drive:.6},{clutch_size:.6},{offspring_share:.6},{hunger_memory:.6},{threat_timer:.6},{resource_selectivity:.6},{migration_x:.6},{migration_y:.6},{migration_active}",
-                            tick = tick,
-                            pos_x = position.0.x,
-                            pos_y = position.0.y,
-                            vel_x = velocity.0.x,
-                            vel_y = velocity.0.y,
-                            speed = speed,
-                            energy_current = energy.current,
-                            energy_max = energy.max,
-                            energy_ratio = energy.ratio(),
-                            age = age.0,
-                            size = size.value(),
-                            organism_type = org_type,
-                            behavior_state = behavior_state,
-                            state_time = behavior.state_time,
-                            target_x = target_x,
-                            target_y = target_y,
-                            target_entity = idx,
-                            sensory_range = sensory_range,
-                            aggression = aggression,
-                            boldness = boldness,
-                            mutation_rate = mutation_rate,
-                            foraging_drive = cached_traits.foraging_drive,
-                            risk_tolerance = cached_traits.risk_tolerance,
-                            exploration_drive = cached_traits.exploration_drive,
-                            clutch_size = cached_traits.clutch_size,
-                            offspring_share = cached_traits.offspring_energy_share,
-                            hunger_memory = behavior.hunger_memory,
-                            threat_timer = behavior.threat_timer,
-                            resource_selectivity = cached_traits.resource_selectivity,
-                            migration_x = migration_x,
-                            migration_y = migration_y,
-                            migration_active = migration_active
-                        )
-                        .expect("Failed to write CSV row");
-                    }
-                    None => {
-                        writeln!(
-                            writer,
-                            "{tick},{pos_x:.6},{pos_y:.6},{vel_x:.6},{vel_y:.6},{speed:.6},{energy_current:.6},{energy_max:.6},{energy_ratio:.6},{age},{size:.6},{organism_type:?},{behavior_state},{state_time:.6},{target_x:.6},{target_y:.6},None,{sensory_range:.6},{aggression:.6},{boldness:.6},{mutation_rate:.6},{foraging_drive:.6},{risk_tolerance:.6},{exploration_drive:.6},{clutch_size:.6},{offspring_share:.6},{hunger_memory:.6},{threat_timer:.6},{resource_selectivity:.6},{migration_x:.6},{migration_y:.6},{migration_active}",
-                            tick = tick,
-                            pos_x = position.0.x,
-                            pos_y = position.0.y,
-                            vel_x = velocity.0.x,
-                            vel_y = velocity.0.y,
-                            speed = speed,
-                            energy_current = energy.current,
-                            energy_max = energy.max,
-                            energy_ratio = energy.ratio(),
-                            age = age.0,
-                            size = size.value(),
-                            organism_type = org_type,
-                            behavior_state = behavior_state,
-                            state_time = behavior.state_time,
-                            target_x = target_x,
-                            target_y = target_y,
-                            sensory_range = sensory_range,
-                            aggression = aggression,
-                            boldness = boldness,
-                            mutation_rate = mutation_rate,
-                            foraging_drive = cached_traits.foraging_drive,
-                            risk_tolerance = cached_traits.risk_tolerance,
-                            exploration_drive = cached_traits.exploration_drive,
-                            clutch_size = cached_traits.clutch_size,
-                            offspring_share = cached_traits.offspring_energy_share,
-                            hunger_memory = behavior.hunger_memory,
-                            threat_timer = behavior.threat_timer,
-                            resource_selectivity = cached_traits.resource_selectivity,
-                            migration_x = migration_x,
-                            migration_y = migration_y,
-                            migration_active = migration_active
-                        )
-                        .expect("Failed to write CSV row");
-                    }
-                }
-
-                if tick % 100 == 0 {
-                    writer.flush().expect("Failed to flush CSV writer");
-                }
-            }
-
-            if needs_header {
-                tracked_mut.header_written = true;
-            }
-        } else {
-            info!("[TRACKED] Organism entity {:?} no longer exists", entity);
-            tracked_mut.entity = None;
-
-            if let Some(mut writer) = tracked_mut.csv_writer.take() {
-                writer.flush().expect("Failed to flush CSV writer on close");
-            }
-        }
-    }
-}

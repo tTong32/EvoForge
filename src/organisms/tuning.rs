@@ -64,7 +64,7 @@ impl Default for EcosystemTuning {
 
             // Consumption (balanced with 20.1x metabolism for 600-tick lifetime)
             // Increased to match high metabolism rate
-            plant_consumption_rate_base: 28.0,  // Increased to balance high metabolism
+            plant_consumption_rate_base: 28.0/5,  // Increased to balance high metabolism
             meat_consumption_rate_base: 20.0,   // Increased to balance high metabolism
             energy_conversion_efficiency: 0.65, // Increased for better energy balance
             decomposer_efficiency_multiplier: 0.6, // Increased from 0.5 (decomposers are more efficient)
@@ -79,7 +79,8 @@ impl Default for EcosystemTuning {
             max_reproduction_cooldown: 161.0,   // 3600 / 22.34 ≈ 161 ticks
 
             // Spawn
-            initial_spawn_count: 99,
+            initial_spawn_count: 102,
+            initial_species_count: 6,
 
             // Speciation
             speciation_threshold: 0.15,
@@ -112,7 +113,7 @@ impl EcosystemTuning {
         tuning.max_reproduction_cooldown = 215.0;     // 4800 / 22.34 ≈ 215 ticks
         tuning.plant_regeneration_rate = 4.02;        // 0.18 × 22.34
         tuning.water_regeneration_rate = 4.91;      // 0.22 × 22.34
-        tuning.plant_consumption_rate_base = 24.5;   // Scaled proportionally
+        tuning.plant_consumption_rate_base = 24.5/5;   // Scaled proportionally
         tuning.meat_consumption_rate_base = 17.5;   // Scaled proportionally
         tuning
     }
@@ -124,7 +125,7 @@ impl EcosystemTuning {
         tuning.water_regeneration_rate = 2.23;      // 0.10 × 22.34
         tuning.plant_decay_rate = 0.335;            // 0.015 × 22.34
         tuning.plant_consumption_rate_base = 35.0;  // Scaled proportionally
-        tuning.meat_consumption_rate_base = 28.0;   // Scaled proportionally
+        tuning.meat_consumption_rate_base = 28.0/5;   // Scaled proportionally
         tuning.base_metabolism_multiplier = 24.6;   // 1.1 × 22.34
         tuning
     }

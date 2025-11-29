@@ -29,13 +29,13 @@ pub struct OrganismPlugin;
 impl Plugin for OrganismPlugin {
     fn build(&self, app: &mut App) {
         app
-            .init_resource::<systems::TrackedOrganism>()
             .init_resource::<systems::SpatialHashTracker>()
             .init_resource::<systems::PredationEventGrouping>() // Optimization: reuse HashMap
             .init_resource::<systems::SpatialQueryBuffer>() // Optimization: reuse Vec buffer for spatial queries
             .init_resource::<systems::ReproductionEventBuffer>() // Optimization: reuse Vec buffer for reproduction events
             .init_resource::<systems::GlobalRng>() // Optimization: resource-backed RNG
             .init_resource::<systems::EligibleChildrenSet>() // Optimization: reuse HashSet for eligible children
+            .init_resource::<systems::CellModificationsBuffer>() // Optimization: batch cell modifications
             .init_resource::<crate::utils::SpatialHashGrid>()
             .init_resource::<behavior::SensoryDataCache>() // Add sensory cache (optimization 3)
             .init_resource::<speciation::SpeciesTracker>() // Step 8: Speciation system

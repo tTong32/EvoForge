@@ -23,7 +23,7 @@ impl PlantTraits {
         use crate::organisms::genetics::traits as animal_traits;
 
         Self {
-            growth_rate: animal_traits::express_metabolism_rate(genome).clamp(0.01, 0.2),
+            growth_rate: animal_traits::express_metabolism_rate(genome).clamp(0.01, 0.25),
             spread_rate: animal_traits::express_exploration_drive(genome).clamp(0.01, 0.3),
             sunlight_efficiency: animal_traits::express_resource_selectivity(genome)
                 .clamp(0.2, 1.2),

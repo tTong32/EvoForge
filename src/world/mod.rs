@@ -32,7 +32,7 @@ pub use events::{DisasterEvents, Disaster, DisasterType};
 /// World size configuration
 /// Maximum radius in chunks from origin (0,0)
 /// Default: 100 chunks = ~6,400 world units radius
-pub const MAX_WORLD_RADIUS_CHUNKS: i32 = 100;
+pub const MAX_WORLD_RADIUS_CHUNKS: i32 = 50;
 
 /// Distance in chunks beyond organism activity before unloading chunks
 /// Chunks further than this from any organism will be unloaded
@@ -91,7 +91,6 @@ pub struct WorldBounds {
     /// Last known bounds of organism activity
     activity_bounds: Option<(i32, i32, i32, i32)>, // (min_x, max_x, min_y, max_y)
 }
-
 /// Reusable buffer for cell updates (avoids repeated allocations)
 #[derive(Resource, Default)]
 pub struct CellUpdateBuffer {
@@ -119,6 +118,37 @@ impl WorldBounds {
     }
 }
 
+pub const plant_update_timer = 5;
+
+#[derive(Resource, Default)]
+pub struct PlantUpdateTimer {
+    tick_counter: u32,
+    accumulated_dt: f32,
+    ready_dt: Option<f32>,
+}
+
+impl PlantUpdateTimer {
+    pub fn tick(&mut self, dt: f32) {
+        self.tick_counter += 1;
+        self.accumulated_dt += dt;
+
+        if self.tick_counter >= plant_update_timer {
+            self.ready_dt = Some(self.accumulated_dt);
+            self.tick_counter = 0;
+            self.accumulated_dt = 0.0;
+        } else {
+            self.ready_dt = None;
+        }
+    }
+    pub fn should_update(&self) -> Option<f32> {
+        self.ready_dt
+    }
+}
+
+fn tick_plant_timer(mut timer: ResMut<PlantUpdateTimer>, time: Res<Time>) {
+    timer.tick(time.delta_seconds());
+}
+
 pub struct WorldPlugin;
 
 impl Plugin for WorldPlugin {
@@ -128,6 +158,7 @@ impl Plugin for WorldPlugin {
             .init_resource::<DirtyChunks>()
             .init_resource::<WorldBounds>()
             .init_resource::<CellUpdateBuffer>() // Reusable buffer for cell updates
+            .init_resource::<PlantUpdateTimer>()
             .init_resource::<events::DisasterEvents>() // Step 9: Major disasters
             .add_systems(Startup, initialize_world)
             .add_systems(
@@ -139,6 +170,7 @@ impl Plugin for WorldPlugin {
                     update_chunks,
                     regenerate_and_decay_resources,
                     flow_resources,
+                    tick_plant_timer,
                     plant_systems::update_plants_system,
                     plant_systems::plant_spread_system,
                     events::update_disaster_events, // Step 9: Update disasters

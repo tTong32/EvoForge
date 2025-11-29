@@ -312,6 +312,10 @@ pub fn collect_sensory_data(
     let mut best_resource_value = 0.0f32;
     const MAX_RESOURCES_TO_CHECK: usize = 20; // Early termination limit
     let mut resources_found = 0;
+    
+    // Collect all candidate resources with equal values to break ties randomly
+    // This prevents directional bias from iteration order
+    let mut best_resource_candidates: SmallVec<[(Vec2, ResourceType, f32, f32); 8]> = SmallVec::new();
 
     // Only check cells within sensory range bounds
     for dy in -search_radius..=search_radius {
@@ -350,10 +354,20 @@ pub fn collect_sensory_data(
                     if value > 0.1 {
                         let distance = distance_sq.sqrt();
                         
-                        // Avoid clone by constructing entry once and reusing
+                        // Collect all resources with the best value (or better) to break ties randomly
                         if value > best_resource_value {
+                            // New best value - clear old candidates
                             best_resource_value = value;
-                            sensory.richest_resource = Some((
+                            best_resource_candidates.clear();
+                            best_resource_candidates.push((
+                                Vec2::new(check_x, check_y),
+                                *resource_type,
+                                distance,
+                                value,
+                            ));
+                        } else if (value - best_resource_value).abs() < 0.001 {
+                            // Equal value - add to candidates for random selection
+                            best_resource_candidates.push((
                                 Vec2::new(check_x, check_y),
                                 *resource_type,
                                 distance,
@@ -377,6 +391,19 @@ pub fn collect_sensory_data(
         if resources_found >= MAX_RESOURCES_TO_CHECK && best_resource_value > 0.5 {
             break;
         }
+    }
+    
+    // Select best resource from candidates using entity-based hash for deterministic but varied selection
+    if !best_resource_candidates.is_empty() {
+        // Use entity ID and position to create a pseudo-random but deterministic selection
+        // This ensures each organism picks differently but consistently
+        let hash = ((entity.index() as u64)
+            .wrapping_mul(2654435761)
+            .wrapping_add(position.x.to_bits() as u64)
+            .wrapping_add(position.y.to_bits() as u64)) as usize;
+        let selected_idx = hash % best_resource_candidates.len();
+        let selected = best_resource_candidates[selected_idx];
+        sensory.richest_resource = Some(selected);
     }
 
     // Optimization: Only sort if resources will be used for decision-making
@@ -774,6 +801,7 @@ pub fn calculate_behavior_velocity(
     _organism_type: OrganismType,
     energy: &Energy,
     time: f32,
+    entity_id: u64, // Entity ID for pseudo-random but deterministic variation
 ) -> Vec2 {
     let max_speed = cached_traits.speed;
     let speed_factor = energy.ratio().max(0.3); // Minimum 30% speed even when low energy
@@ -787,8 +815,12 @@ pub fn calculate_behavior_velocity(
                 let direction = (position - flee_from).normalize_or_zero();
                 direction * current_speed // Flee at max speed
             } else {
-                // Random direction if no target
-                let angle = (time * 2.0).sin() * std::f32::consts::PI;
+                // Random direction if no target - use entity-based pseudo-random
+                let seed = entity_id
+                    .wrapping_mul(2654435761)
+                    .wrapping_add((time * 1000.0) as u64);
+                let hash = seed.wrapping_mul(0x9e3779b9).wrapping_add(seed >> 32);
+                let angle = ((hash as f32) / (u32::MAX as f32 + 1.0)) * std::f32::consts::TAU;
                 Vec2::from_angle(angle) * current_speed
             }
         }
@@ -820,11 +852,27 @@ pub fn calculate_behavior_velocity(
         }
         BehaviorState::Migrating => {
             if let Some(target) = behavior.migration_target.or(behavior.target_position) {
-                let direction = (target - position).normalize_or_zero();
+                // Add small random offset to migration target to prevent all organisms converging
+                let seed = entity_id
+                    .wrapping_mul(2654435761)
+                    .wrapping_add((time * 1000.0) as u64);
+                let hash1 = seed.wrapping_mul(0x9e3779b9).wrapping_add(seed >> 32);
+                let hash2 = seed.wrapping_mul(1103515245).wrapping_add(seed >> 16);
+                let offset_magnitude = ((hash1 as f32) / (u32::MAX as f32 + 1.0)) * 5.0 - 2.5; // -2.5 to 2.5
+                let offset_angle = ((hash2 as f32) / (u32::MAX as f32 + 1.0)) * std::f32::consts::TAU;
+                let offset = Vec2::from_angle(offset_angle) * offset_magnitude;
+                let adjusted_target = target + offset;
+                let direction = (adjusted_target - position).normalize_or_zero();
                 direction * current_speed * 0.8
             } else {
-                let angle = (time * 0.4 + (position.x * 0.3) + (position.y * 0.17)).cos()
-                    * std::f32::consts::TAU;
+                // Use entity-based pseudo-random angle instead of deterministic sin/cos
+                let seed = entity_id
+                    .wrapping_mul(2654435761)
+                    .wrapping_add(position.x.to_bits() as u64)
+                    .wrapping_add(position.y.to_bits() as u64)
+                    .wrapping_add((time * 1000.0) as u64);
+                let hash = seed.wrapping_mul(0x9e3779b9).wrapping_add(seed >> 32);
+                let angle = ((hash as f32) / (u32::MAX as f32 + 1.0)) * std::f32::consts::TAU;
                 Vec2::from_angle(angle) * current_speed * 0.5
             }
         }
@@ -833,9 +881,19 @@ pub fn calculate_behavior_velocity(
             let wander_speed_mult = match _organism_type {
                 OrganismType::Consumer => 0.7, // Consumers move more actively
             };
-            // Random walk with occasional direction changes
-            let angle =
-                (time * 0.5 + (position.x + position.y) * 0.1).sin() * std::f32::consts::TAU;
+            // Random walk with pseudo-random but deterministic angle based on entity and position
+            // This ensures each organism has a unique wandering pattern
+            let seed = entity_id
+                .wrapping_mul(2654435761)
+                .wrapping_add(position.x.to_bits() as u64)
+                .wrapping_add(position.y.to_bits() as u64)
+                .wrapping_add((time * 1000.0) as u64);
+            // Use a hash-based pseudo-random angle (0 to 2π)
+            // Mix bits for better distribution
+            let hash = seed
+                .wrapping_mul(0x9e3779b9)
+                .wrapping_add(seed >> 32);
+            let angle = ((hash as f32) / (u32::MAX as f32 + 1.0)) * std::f32::consts::TAU;
             Vec2::from_angle(angle) * current_speed * wander_speed_mult
         }
     }

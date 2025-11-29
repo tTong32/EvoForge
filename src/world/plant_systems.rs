@@ -7,8 +7,15 @@ use crate::world::{Cell, WorldGrid};
 use crate::world::plants::{PlantCommunity, PlantSpecies};
 
 /// Update plant growth, competition, and nutrient cycling in all cells.
-pub fn update_plants_system(mut world_grid: ResMut<WorldGrid>, time: Res<Time>) {
-    let dt = time.delta_seconds();
+pub fn update_plants_system(
+    mut world_grid: ResMut<WorldGrid>, 
+    timer: Res<crate::world::PlantUpdateTimer>,
+    time: Res<Time>
+) {
+    let dt = match timer.should_update() {
+        Some(accumulated_dt) => accumulated_dt,
+        None => return,
+    };
 
     let coords = world_grid.get_chunk_coords();
     for (cx, cy) in coords {
@@ -133,8 +140,15 @@ fn resource_availability(
 }
 
 /// Simple plant spreading between neighboring cells.
-pub fn plant_spread_system(mut world_grid: ResMut<WorldGrid>, time: Res<Time>) {
-    let dt = time.delta_seconds();
+pub fn plant_spread_system(
+    mut world_grid: ResMut<WorldGrid>, 
+    timer: Res<crate::world::PlantUpdateTimer>,
+    time: Res<Time>
+) {
+    let dt = match timer.should_update() {
+        Some(accumulated_dt) => accumulated_dt,
+        None => return,
+    }
 
     #[derive(Clone)]
     struct SpreadEvent {
